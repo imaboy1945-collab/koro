@@ -11,18 +11,12 @@ GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-GEMINI_MODEL = "gemini-2.0-flash"
+# 모델을 1.5 Flash로 변경 (무료 티어에서 2.0보다 안정적일 수 있음)
+GEMINI_MODEL = "gemini-1.5-flash"
 GEMINI_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 KST = timezone(timedelta(hours=9))
-
-# ── 뉴스 RSS 소스 (2026년 기준 작동 확인 주소로 업데이트) ──
-RSS_FEEDS = [
-    ("연합뉴스TV", "https://www.yonhapnewstv.co.kr/category/news/economy/feed/"),
-    ("매일경제", "https://www.mk.co.kr/rss/30100041"),
-    ("한국경제", "https://www.hankyung.com/feed/stock"),
-]
 
 def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text or "")
@@ -30,97 +24,95 @@ def strip_html(text: str) -> str:
 
 def fetch_rss_news() -> str:
     articles = []
-    # 브라우저처럼 보이게 하기 위한 헤더
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    
+    # 안정적인 RSS 주소로 재선정
+    feeds = [
+        ("매일경제", "https://www.mk.co.kr/rss/30100041"),
+        ("한국경제", "https://www.hankyung.com/feed/stock"),
+    ]
 
     with httpx.Client(timeout=30, follow_redirects=True, headers=headers) as client:
-        for source, url in RSS_FEEDS:
+        for source, url in feeds:
             try:
                 resp = client.get(url)
                 if resp.status_code != 200: continue
-                
                 root = ET.fromstring(resp.content)
-                items = root.findall(".//item")
-                
-                count = 0
-                for item in items:
-                    if count >= 5: break
+                for item in root.findall(".//item")[:5]:
                     title = strip_html(item.findtext("title"))
-                    desc  = strip_html(item.findtext("description"))[:200]
-                    if title:
-                        articles.append(f"[{source}] {title}\n{desc}")
-                        count += 1
-                print(f"[RSS] {source} 수집 성공")
-            except Exception as e:
-                print(f"[RSS 오류] {source}: {e}")
-                continue
-
-    return "\n\n".join(articles) if articles else "현재 수집된 최신 뉴스가 없습니다. 일반적인 시장 상황을 분석해 주세요."
+                    if title: articles.append(f"[{source}] {title}")
+            except: continue
+    return "\n".join(articles) if articles else "최신 뉴스를 가져오지 못했습니다."
 
 def fetch_top5_volatile() -> str:
     today = datetime.now(KST).strftime("%Y%m%d")
     url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-    headers = {"Referer": "http://data.krx.co.kr/", "User-Agent": "Mozilla/5.0"}
+    
+    # KRX는 헤더 검증이 매우 까다로움
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "http://data.krx.co.kr/contents/MDC/STAT/standard/MDCSTAT01501.jsp",
+        "Origin": "http://data.krx.co.kr",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    }
     
     results = {}
-    for mid, mname in [("STK", "코스피"), ("KSQ", "코스닥")]:
-        try:
-            payload = {"bld": "dbms/MDC/STAT/standard/MDCSTAT01501", "mktId": mid, "trdDd": today, "money": "1", "sortKey": "FLUC_RT", "pageSize": "5", "currentPage": "1"}
-            with httpx.Client(timeout=20) as client:
-                r_up = client.post(url, headers=headers, data={**payload, "ascDesc": "desc"})
-                r_down = client.post(url, headers=headers, data={**payload, "ascDesc": "asc"})
-            
-            combined = r_up.json().get("output", [])[:5] + r_down.json().get("output", [])[:5]
-            combined.sort(key=lambda x: abs(float(x.get("FLUC_RT", 0))), reverse=True)
-            results[mname] = combined[:5]
-        except: results[mname] = []
+    with httpx.Client(timeout=30, headers=headers) as client:
+        for mid, mname in [("STK", "코스피"), ("KSQ", "코스닥")]:
+            try:
+                # 1단계: 세션 쿠키 확보를 위한 메인 페이지 접속 (필요한 경우)
+                client.get("http://data.krx.co.kr/contents/MDC/STAT/standard/MDCSTAT01501.jsp")
+                
+                payload = {
+                    "bld": "dbms/MDC/STAT/standard/MDCSTAT01501",
+                    "mktId": mid, "trdDd": today, "money": "1", "sortKey": "FLUC_RT", "pageSize": "5", "currentPage": "1"
+                }
+                
+                # 급등(desc)과 급락(asc) 가져오기
+                r_up = client.post(url, data={**payload, "ascDesc": "desc"})
+                r_down = client.post(url, data={**payload, "ascDesc": "asc"})
+                
+                data = r_up.json().get("output", []) + r_down.json().get("output", [])
+                data.sort(key=lambda x: abs(float(x.get("FLUC_RT", 0))), reverse=True)
+                results[mname] = data[:5]
+            except Exception as e:
+                print(f"[KRX 오류] {mname}: {e}")
+                results[mname] = []
 
     lines = ["\n### 오늘의 변동성 Top5\n"]
     for mname, stocks in results.items():
         lines.append(f"**{mname}**")
-        if not stocks: lines.append("- 데이터를 가져올 수 없습니다.")
+        if not stocks:
+            lines.append("- 현재 데이터를 가져올 수 없습니다 (KRX 서버 제한)")
         for i, s in enumerate(stocks, 1):
             rate = float(s.get("FLUC_RT", 0))
             lines.append(f"- {i}. {s.get('ISU_ABBRV')} {'+' if rate>=0 else ''}{rate:.2f}% | {s.get('TDD_CLSPRC')}원")
     return "\n".join(lines)
 
 def call_gemini(session: str, news_text: str) -> str:
-    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    prompt = f"당신은 주식 애널리스트입니다. 현재 시각: {now_kst}\n세션: {session}\n\n뉴스 데이터:\n{news_text}\n\n위 뉴스를 요약하고 시장 영향을 분석하여 텔레그램 브리핑 형식으로 작성하세요. 소제목은 ###을 사용하고 이모지는 쓰지 마세요."
+    prompt = f"주식 애널리스트로서 오늘 {session}(pre:장전, post:장후) 브리핑을 작성하세요.\n뉴스:\n{news_text}\n\n형식: ## 제목, ### 소제목 사용. 800자 내외."
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.3}}
-
-    # 429 에러 대비 재시도 로직
     for i in range(3):
         try:
             with httpx.Client(timeout=60) as client:
                 resp = client.post(GEMINI_URL, json=payload)
                 if resp.status_code == 429:
-                    print(f"Gemini API 제한 발생(429). {10*(i+1)}초 후 재시도...")
-                    time.sleep(10 * (i+1))
+                    time.sleep(20 * (i+1)) # 429 발생 시 더 길게 대기
                     continue
                 resp.raise_for_status()
                 return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
-            if i == 2: return f"Gemini 분석 실패: {e}"
-            time.sleep(5)
-    return "Gemini 분석에 실패했습니다."
+            if i == 2: return f"Gemini 분석 실패 (원인: {str(e)[:50]})"
+            time.sleep(10)
+    return "Gemini 응답 지연으로 분석 실패"
 
 def send_telegram(text: str) -> None:
-    # 텔레그램 메시지 길이 제한(4096자) 대응
-    if len(text) > 4000: text = text[:4000] + "..."
-    
-    try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(TELEGRAM_URL, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
-            resp.raise_for_status()
-    except Exception as e:
-        print(f"텔레그램 전송 실패: {e}")
+    with httpx.Client(timeout=30) as client:
+        client.post(TELEGRAM_URL, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
 
 def main():
     session = sys.argv[1] if len(sys.argv) > 1 else "pre"
-    print(f"[{session}] 브리핑 프로세스 시작")
-    
     news = fetch_rss_news()
     analysis = call_gemini(session, news)
     
@@ -128,7 +120,6 @@ def main():
         analysis += "\n" + fetch_top5_volatile()
         
     send_telegram(analysis)
-    print("모든 작업 완료")
 
 if __name__ == "__main__":
     main()
