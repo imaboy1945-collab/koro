@@ -13,7 +13,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 TOP_N     = 10
 BLOG_URL  = "https://bestwellth.org"
-MIN_SCORE = 50
+MIN_SCORE = 40
 
 def get_kospi200_tickers():
     try:
