@@ -2,10 +2,8 @@ name: KOSDAQ Breakout Scanner
 
 on:
   schedule:
-    # 한국 시간 기준 오후 3시 40분 실행 (UTC 기준 06:40)
-    # 월~금요일(1-5) 장 마감 직후에만 작동하도록 슬림하게 세팅
     - cron: '40 6 * * 1-5'
-  workflow_dispatch: # 수동 실행 버튼 활성화
+  workflow_dispatch:
 
 jobs:
   run-scanner:
@@ -27,8 +25,7 @@ jobs:
         
     - name: KOSDAQ 돌파매매 스캐너 실행
       env:
-        # GitHub 레포지토리 Settings -> Secrets and variables 에 등록한 값 호출
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-      # 파일명에 띄어쓰기가 있으므로 반드시 따옴표로 묶어서 실행
+        # Secrets 이름에 정확히 맞춰서 환경변수 세팅
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python "kosdaq line.py"
