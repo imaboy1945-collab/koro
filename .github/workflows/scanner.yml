@@ -2,8 +2,10 @@ name: KOSDAQ Breakout Scanner
 
 on:
   schedule:
-    - cron: '40 6 * * 1-5'
-  workflow_dispatch:
+    # 한국 시간(KST) 15:30 = UTC 06:30
+    # 월~금요일(1-5) 장 마감 시간에 자동 실행
+    - cron: '30 6 * * 1-5'
+  workflow_dispatch: # 필요할 때 수동으로 바로 실행할 수 있는 버튼 추가
 
 jobs:
   run-scanner:
@@ -19,13 +21,15 @@ jobs:
         python-version: '3.10'
         
     - name: 필수 라이브러리 설치
+      # 앞서 요청하신 대로 slimmer한 환경을 위해 최소한의 라이브러리만 설치합니다.
       run: |
         python -m pip install --upgrade pip
         pip install finance-datareader requests
         
     - name: KOSDAQ 돌파매매 스캐너 실행
       env:
-        # Secrets 이름에 정확히 맞춰서 환경변수 세팅
+        # 깃허브 Secrets에 등록된 이름과 동일하게 맞춰줍니다.
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # 파일명에 공백이 있으므로 따옴표로 묶어줍니다.
       run: python "kosdaq line.py"
