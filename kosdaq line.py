@@ -27,7 +27,7 @@ def send_telegram(message):
         print(f"텔레그램 전송 중 오류 발생: {e}")
 
 # ==========================================
-# 2. 돌파매매 조건 검색 함수 (이격도 보조지표 추가)
+# 2. 돌파매매 조건 검색 함수 (이격도 보조지표 포함)
 # ==========================================
 def get_breakout_stocks():
     kosdaq_list = fdr.StockListing('KOSDAQ')
@@ -48,7 +48,7 @@ def get_breakout_stocks():
                 continue
             
             today = df.iloc[-1]
-            df_20 = df.iloc[-21:-1] # 어제까지의 20일 데이터
+            df_20 = df.iloc[-21:-1] 
             
             # [조건 1] 가격 기준: 20일 최고 종가 돌파
             highest_close_20 = df_20['Close'].max()
@@ -67,20 +67,13 @@ def get_breakout_stocks():
             if not (change_percent >= 7 and is_yangbong):
                 continue
             
-            # ----------------------------------------
-            # 🛡️ [조건 4] 보조지표: 20일선 이격도 제한 (신규 추가)
-            # ----------------------------------------
-            # 오늘을 포함한 최근 20일간의 평균 가격(20일선) 계산
+            # [조건 4] 보조지표: 20일선 이격도 제한 (상투 방지)
             ma20 = df['Close'].iloc[-20:].mean()
-            
-            # 현재 주가가 20일 평균선 대비 20% 이상 높다면 고점 과열로 판단하여 필터링
             if today['Close'] > (ma20 * 1.20):
                 continue
             
-            # 모든 안전 조건을 통과한 찐 돌파 종목만 리스트에 추가
+            # 리스트 추가 (이격도 수치 포함)
             vol_multiple = today['Volume'] / avg_volume_20
-            
-            # 이격도 수치도 메시지에 함께 표시되도록 추가
             disparity = (today['Close'] / ma20) * 100
             result_stocks.append(f"• <b>{name}</b> ({code}) | +{change_percent:.2f}% | 거래 {vol_multiple:.1f}배 | 이격도 {disparity:.1f}%")
                 
@@ -90,17 +83,28 @@ def get_breakout_stocks():
     return result_stocks
 
 # ==========================================
-# 3. 메인 실행부
+# 3. 메인 실행부 (메시지 조립 및 전송)
 # ==========================================
 if __name__ == "__main__":
     print("스캐닝을 시작합니다. 코스닥 전 종목 조회로 약간의 시간이 소요됩니다...")
     
     breakout_stocks = get_breakout_stocks()
     
+    # 텔레그램 메시지 상단에 들어갈 스캐너 개요 및 설명 문구 조립
+    intro_text = (
+        "🚀 <b>[코스닥 단기 스윙 돌파 포착]</b>\n\n"
+        "💡 <b>스캐너 조건 개요</b>\n"
+        "1. <b>가격:</b> 20일 최고가 돌파 (악성 매물대 돌파)\n"
+        "2. <b>수급:</b> 20일 평균 대비 거래량 3배 이상 폭증\n"
+        "3. <b>캔들:</b> +7% 이상 장대양봉 (강한 매수세 장악)\n"
+        "4. <b>안전:</b> 20일선 이격도 120% 미만 (고점 추격 방지)\n"
+        "──────────────────\n\n"
+    )
+    
     if breakout_stocks:
-        final_message = "🚀 <b>[코스닥 단기 스윙 돌파 포착]</b>\n\n" + "\n".join(breakout_stocks)
+        final_message = intro_text + "\n".join(breakout_stocks)
     else:
-        final_message = "🚀 <b>[코스닥 단기 스윙 돌파 포착]</b>\n\n오늘은 안전한 타점의 강력한 돌파 종목이 없습니다."
+        final_message = intro_text + "오늘은 모든 조건을 완벽하게 만족하는 강력한 돌파 종목이 없습니다."
         
     send_telegram(final_message)
     print("텔레그램 전송 완료!")
