@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>나만의 프롭테크 지도</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-image/leaflet-image.js"></script>
+    
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Malgun Gothic', sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; }
+
+        #sidebar {
+            width: 390px; background: #fff;
+            box-shadow: 3px 0 12px rgba(0,0,0,0.12);
+            z-index: 1000; display: flex; flex-direction: column;
+            padding: 20px; overflow-y: auto;
+        }
+        .logo { font-size: 20px; font-weight: bold; color: #1a252f; margin-bottom: 24px; display: flex; align-items: center; gap: 8px; }
+
+        .export-panel {
+            background: linear-gradient(160deg, #1a252f 0%, #2c3e50 100%);
+            border-radius: 12px; padding: 16px; margin-bottom: 18px; color: white;
+        }
+        .export-panel-title { font-size: 13px; font-weight: bold; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,0.9); }
+
+        .export-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+        .etab {
+            flex: 1; padding: 8px 4px; border-radius: 6px;
+            border: 1.5px solid rgba(255,255,255,0.2);
+            background: rgba(255,255,255,0.07);
+            color: rgba(255,255,255,0.7); font-size: 11px; font-weight: bold;
+            cursor: pointer; text-align: center; transition: all 0.2s;
+        }
+        .etab:hover { background: rgba(255,255,255,0.15); }
+        .etab.active { background: #2980b9; border-color: #3498db; color: white; }
+
+        .tab-pane { display: none; }
+        .tab-pane.active { display: block; }
+
+        .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+        .form-row label { font-size: 11px; color: rgba(255,255,255,0.65); white-space: nowrap; min-width: 54px; }
+        .form-row select, .form-row input[type="number"] {
+            flex: 1; padding: 7px 8px;
+            border: 1.5px solid rgba(255,255,255,0.2);
+            border-radius: 6px; background: rgba(255,255,255,0.1);
+            color: white; font-size: 12px; outline: none;
+        }
+        .form-row select option { background: #2c3e50; }
+
+        .status-bar { font-size: 11px; color: rgba(255,255,255,0.55); margin: 8px 0; min-height: 15px; line-height: 1.5; }
+        .status-bar.ok   { color: #2ecc71; }
+        .status-bar.err  { color: #e74c3c; }
+        .status-bar.warn { color: #f39c12; }
+
+        .tile-preview {
+            background: rgba(0,0,0,0.25); border-radius: 6px;
+            padding: 8px 10px; margin-bottom: 10px; font-size: 11px;
+            color: rgba(255,255,255,0.7); line-height: 1.8; display: none;
+        }
+        .tile-preview.visible { display: block; }
+        .tile-preview b { color: #2ecc71; font-size: 12px; }
+
+        .btn-row { display: flex; gap: 8px; }
+        .btn-main {
+            flex: 1; padding: 11px 8px; border-radius: 7px; border: none;
+            font-size: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-main:hover { filter: brightness(1.12); transform: translateY(-1px); }
+        .btn-main:disabled { filter: none; transform: none; opacity: 0.5; cursor: not-allowed; }
+        .btn-green  { background: linear-gradient(135deg, #27ae60, #2ecc71); color: white; }
+        .btn-orange { background: linear-gradient(135deg, #e67e22, #f39c12); color: white; }
+        .btn-ghost  { background: rgba(255,255,255,0.1); border: 1.5px solid rgba(255,255,255,0.25) !important; color: white; }
+
+        #capture-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.75); z-index: 9999;
+            align-items: center; justify-content: center;
+            flex-direction: column; gap: 14px; color: white;
+        }
+        #capture-overlay.active { display: flex; }
+        .spinner { width: 46px; height: 46px; border: 5px solid rgba(255,255,255,0.2); border-top-color: #3498db; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #overlay-msg { font-size: 16px; font-weight: bold; }
+        #overlay-sub { font-size: 12px; color: rgba(255,255,255,0.6); }
+        #overlay-prog { width: 260px; height: 7px; background: rgba(255,255,255,0.15); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+        #overlay-prog-bar { height: 100%; background: #3498db; border-radius: 4px; width: 0%; transition: width 0.15s; }
+
+        #map { flex: 1; height: 100%; }
+        #map.selecting-mode { cursor: crosshair !important; }
+    </style>
+</head>
+<body>
+
+<div id="capture-overlay">
+    <div class="spinner"></div>
+    <div id="overlay-msg">타일을 불러오는 중...</div>
+    <div id="overlay-sub"></div>
+    <div id="overlay-prog"><div id="overlay-prog-bar"></div></div>
+</div>
+
+<div id="sidebar">
+    <div class="logo">🏢 My PropMap</div>
+    
+    <div class="export-panel">
+        <div class="export-panel-title">📸 지도 이미지 내보내기</div>
+
+        <div class="export-tabs">
+            <div class="etab active" onclick="switchTab('quick')">⚡ 빠른 저장</div>
+            <div class="etab" onclick="switchTab('large')">🔍 고해상도 타일 붙이기</div>
+        </div>
+
+        <div class="tab-pane active" id="tab-quick">
+            <div class="form-row">
+                <label>배율</label>
+                <select id="q-scale">
+                    <option value="1">1× 표준</option>
+                    <option value="2" selected>2× 고화질</option>
+                    <option value="3">3× 최고</option>
+                </select>
+                <label>형식</label>
+                <select id="q-format"><option value="png">PNG</option><option value="jpeg">JPEG</option></select>
+            </div>
+            <div class="status-bar" id="quick-status">현재 화면을 캡처합니다.</div>
+            <div class="btn-row">
+                <button class="btn-main btn-ghost" id="btn-area-sel" onclick="startAreaSelect(false)">✏️ 영역 선택</button>
+                <button class="btn-main btn-green" onclick="quickSave()">💾 저장</button>
+            </div>
+        </div>
+
+        <div class="tab-pane" id="tab-large">
+            <div class="form-row">
+                <label>지도 타입</label>
+                <select id="l-tiletype">
+                    <option value="Base">일반지도</option>
+                    <option value="Satellite" selected>위성사진</option>
+                    <option value="Hybrid">하이브리드</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>내보내기 줌</label>
+                <select id="l-zoom" onchange="calcTilePreview()">
+                    <option value="15">줌 15</option>
+                    <option value="16">줌 16</option>
+                    <option value="17">줌 17</option>
+                    <option value="18" selected>줌 18 (권장)</option>
+                    <option value="19">줌 19 (최고화질)</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>영역 기준</label>
+                <select id="l-area-mode" onchange="calcTilePreview()">
+                    <option value="viewport">현재 화면 전체</option>
+                    <option value="selection">선택 영역 사용</option>
+                </select>
+            </div>
+
+            <div class="tile-preview" id="tile-preview">
+                <div>예상 타일 수: <b id="prev-tiles">-</b></div>
+                <div>출력 해상도: <b id="prev-res">-</b></div>
+                <div>예상 소요: <b id="prev-time">-</b></div>
+            </div>
+
+            <div class="status-bar" id="large-status">줌레벨을 선택하면 정보가 표시됩니다.</div>
+            <div class="btn-row">
+                <button class="btn-main btn-ghost" id="btn-area-sel2" onclick="startAreaSelect(true)">✏️ 영역 그리기</button>
+                <button class="btn-main btn-orange" onclick="largeSave()">🔍 큰 이미지 저장</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+// ─────────────────────────────────────
+// 1. 지도 초기화 (최대 줌 19, 기본 위성지도)
+// ─────────────────────────────────────
+var vworldBase      = L.tileLayer('https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png',       {maxZoom:19,attribution:'&copy; V-World'});
+var vworldSatellite = L.tileLayer('https://xdworld.vworld.kr/2d/Satellite/service/{z}/{x}/{y}.jpeg', {maxZoom:19,attribution:'&copy; V-World'});
+var vworldHybrid    = L.tileLayer('https://xdworld.vworld.kr/2d/Hybrid/service/{z}/{x}/{y}.png',     {maxZoom:19,attribution:'&copy; V-World'});
+
+var map = L.map('map',{zoomControl:false,maxZoom:19,layers:[vworldSatellite]}).setView([37.5263,126.8962],16);
+L.control.zoom({position:'bottomright'}).addTo(map);
+L.control.layers({"🗺️ 일반지도":vworldBase,"🛰️ 위성지도":vworldSatellite},{"🏷️ 하이브리드":vworldHybrid},{position:'topright'}).addTo(map);
+map.on('moveend zoomend', calcTilePreview);
+
+// ─────────────────────────────────────
+// 2. 탭 전환
+// ─────────────────────────────────────
+function switchTab(t){
+    document.querySelectorAll('.etab').forEach(function(el,i){el.classList.toggle('active',(i===0&&t==='quick')||(i===1&&t==='large'));});
+    document.getElementById('tab-quick').classList.toggle('active',t==='quick');
+    document.getElementById('tab-large').classList.toggle('active',t==='large');
+    if(t==='large') calcTilePreview();
+}
+
+// ─────────────────────────────────────
+// 3. 영역 선택
+// ─────────────────────────────────────
+var selRect=null, selBounds=null, isSelecting=false, selStart=null;
+
+function startAreaSelect(forLarge){
+    if(isSelecting) return;
+    isSelecting=true; selBounds=null;
+    if(selRect){map.removeLayer(selRect);selRect=null;}
+    var btnId=forLarge?'btn-area-sel2':'btn-area-sel';
+    document.getElementById(btnId).textContent='✖ 취소';
+    document.getElementById('map').classList.add('selecting-mode');
+    map.dragging.disable();
+
+    map.once('mousedown',function(e){
+        selStart=e.latlng;
+        function onMove(e2){
+            var b=L.latLngBounds(selStart,e2.latlng);
+            if(selRect) map.removeLayer(selRect);
+            selRect=L.rectangle(b,{color:'#e74c3c',weight:2,fillColor:'#e74c3c',fillOpacity:0.12,dashArray:'6 4'}).addTo(map);
+        }
+        function onUp(e2){
+            map.off('mousemove',onMove); map.off('mouseup',onUp);
+            selBounds=L.latLngBounds(selStart,e2.latlng);
+            isSelecting=false; map.dragging.enable();
+            document.getElementById('map').classList.remove('selecting-mode');
+            document.getElementById(btnId).textContent=forLarge?'✏️ 다시 그리기':'✏️ 영역 선택';
+            if(forLarge) document.getElementById('l-area-mode').value='selection';
+            setStatus(forLarge?'large':'quick','✅ 영역 선택 완료. 저장을 누르세요.','ok');
+            calcTilePreview();
+        }
+        map.on('mousemove',onMove); map.on('mouseup',onUp);
+    });
+}
+
+function setStatus(tab,msg,cls){
+    var el=document.getElementById(tab==='large'?'large-status':'quick-status');
+    el.textContent=msg; el.className='status-bar '+(cls||'');
+}
+
+// ─────────────────────────────────────
+// 4. 좌표 <-> 타일 변환
+// ─────────────────────────────────────
+function lngLatToTile(lng,lat,z){
+    var n=Math.pow(2,z);
+    var x=Math.floor((lng+180)/360*n);
+    var lr=lat*Math.PI/180;
+    var y=Math.floor((1-Math.log(Math.tan(lr)+1/Math.cos(lr))/Math.PI)/2*n);
+    return {x:x,y:y};
+}
+
+function getExportBounds(){
+    if(document.getElementById('l-area-mode').value==='selection'&&selBounds) return selBounds;
+    return map.getBounds();
+}
+
+function calcTilePreview(){
+    var z=parseInt(document.getElementById('l-zoom').value);
+    var bounds=getExportBounds();
+    var sw=bounds.getSouthWest(), ne=bounds.getNorthEast();
+    var nwT=lngLatToTile(sw.lng,ne.lat,z);
+    var seT=lngLatToTile(ne.lng,sw.lat,z);
+    var tW=seT.x-nwT.x+1, tH=seT.y-nwT.y+1, total=tW*tH;
+    var pxW=tW*256, pxH=tH*256;
+
+    document.getElementById('tile-preview').classList.add('visible');
+    document.getElementById('prev-tiles').textContent=total.toLocaleString()+'개 ('+tW+'×'+tH+')';
+    document.getElementById('prev-res').textContent=pxW.toLocaleString()+' × '+pxH.toLocaleString()+' px';
+    document.getElementById('prev-time').textContent=total<50?'~5초':total<200?'~10~30초':total<500?'~1~2분':'2분 이상 (줌 낮추기 권장)';
+
+    if(total>600) setStatus('large','⚠️ 타일 '+total+'개 — 줌레벨을 낮추거나 영역을 선택하세요.','warn');
+    else setStatus('large','준비 완료 — Z'+z+' / 타일 '+total+'개 / '+pxW.toLocaleString()+'×'+pxH.toLocaleString()+'px','ok');
+}
+
+// ─────────────────────────────────────
+// 5. 빠른 저장
+// ─────────────────────────────────────
+function quickSave(){
+    var scale=parseInt(document.getElementById('q-scale').value);
+    var fmt=document.getElementById('q-format').value;
+    var mime=fmt==='jpeg'?'image/jpeg':'image/png';
+    showOverlay('현재 화면 캡처 중...','');
+    if(selRect) selRect.setStyle({opacity:0,fillOpacity:0});
+
+    leafletImage(map,function(err,canvas){
+        if(selRect) selRect.setStyle({opacity:1,fillOpacity:0.12});
+        hideOverlay();
+        if(err){setStatus('quick','❌ 캡처 실패: '+err,'err');return;}
+        var out=document.createElement('canvas');
+        if(selBounds){
+            var ms=map.getSize();
+            var sw2=map.latLngToContainerPoint(selBounds.getSouthWest());
+            var ne2=map.latLngToContainerPoint(selBounds.getNorthEast());
+            var x=Math.min(sw2.x,ne2.x),y=Math.min(sw2.y,ne2.y);
+            var w=Math.abs(ne2.x-sw2.x),h=Math.abs(ne2.y-sw2.y);
+            var sc=canvas.width/ms.x;
+            out.width=w*sc*scale; out.height=h*sc*scale;
+            var ctx=out.getContext('2d');
+            if(fmt==='jpeg'){ctx.fillStyle='#fff';ctx.fillRect(0,0,out.width,out.height);}
+            ctx.drawImage(canvas,x*sc,y*sc,w*sc,h*sc,0,0,out.width,out.height);
+        } else {
+            out.width=canvas.width*scale; out.height=canvas.height*scale;
+            var ctx=out.getContext('2d');
+            if(fmt==='jpeg'){ctx.fillStyle='#fff';ctx.fillRect(0,0,out.width,out.height);}
+            ctx.drawImage(canvas,0,0,out.width,out.height);
+        }
+        downloadCanvas(out,'PropMap_Quick_'+scale+'x',fmt,mime);
+        setStatus('quick','✅ 저장 완료 ('+out.width+'×'+out.height+'px)','ok');
+    });
+}
+
+// ─────────────────────────────────────
+// 6. ★ 타일 스티칭 고해상도 저장 (속도 우선, 프록시 없음)
+// ─────────────────────────────────────
+async function largeSave(){
+    var z=parseInt(document.getElementById('l-zoom').value);
+    var tileType=document.getElementById('l-tiletype').value;
+    var bounds=getExportBounds();
+    var sw=bounds.getSouthWest(), ne=bounds.getNorthEast();
+
+    var nwT=lngLatToTile(sw.lng,ne.lat,z);  // 좌상단 타일
+    var seT=lngLatToTile(ne.lng,sw.lat,z);  // 우하단 타일
+
+    var tW=seT.x-nwT.x+1, tH=seT.y-nwT.y+1, total=tW*tH;
+
+    if(total>1500){
+        alert('타일이 너무 많습니다 ('+total+'개).\n줌레벨을 낮추거나 영역을 선택 후 다시 시도하세요.');
+        return;
+    }
+
+    var extMap={'Base':'png','Satellite':'jpeg','Hybrid':'png'};
+    var ext=extMap[tileType];
+    var urlTpl='https://xdworld.vworld.kr/2d/'+tileType+'/service/{z}/{x}/{y}.'+ext;
+
+    var canvasW=tW*256, canvasH=tH*256;
+    var offscreen=document.createElement('canvas');
+    offscreen.width=canvasW; offscreen.height=canvasH;
+    var ctx=offscreen.getContext('2d');
+
+    showOverlay('타일 이미지를 불러오는 중...','0 / '+total);
+
+    var loaded=0, failed=0;
+
+    // 타일 1개 로드 (프록시 없이 원본 URL 직접 호출 - 속도 빠름)
+    function loadTile(tx,ty){
+        return new Promise(function(resolve){
+            var url=urlTpl.replace('{z}',z).replace('{x}',tx).replace('{y}',ty);
+            var img=new Image();
+            img.crossOrigin='anonymous';
+            img.onload=function(){
+                var px=(tx-nwT.x)*256, py=(ty-nwT.y)*256;
+                ctx.drawImage(img,px,py,256,256);
+                loaded++; updateProgress(loaded,total); resolve();
+            };
+            img.onerror=function(){
+                // 실패한 타일은 회색 표시
+                var px=(tx-nwT.x)*256, py=(ty-nwT.y)*256;
+                ctx.fillStyle='#cccccc'; ctx.fillRect(px,py,256,256);
+                ctx.fillStyle='rgba(0,0,0,0.15)'; ctx.font='12px sans-serif';
+                ctx.fillText('×',px+122,py+134);
+                loaded++; failed++; updateProgress(loaded,total); resolve();
+            };
+            img.src=url;
+        });
+    }
+
+    // 배치 처리 (동시 6개씩)
+    var allTiles=[];
+    for(var ty=nwT.y;ty<=seT.y;ty++)
+        for(var tx=nwT.x;tx<=seT.x;tx++)
+            allTiles.push([tx,ty]);
+
+    var BATCH=6;
+    for(var i=0;i<allTiles.length;i+=BATCH){
+        var batch=allTiles.slice(i,i+BATCH).map(function(t){return loadTile(t[0],t[1]);});
+        await Promise.all(batch);
+    }
+
+    hideOverlay();
+
+    if(failed===total){
+        setStatus('large','❌ 모든 타일 로드 실패 — 로컬 서버(Live Server) 등에서 CORS 해제 실행 필요','err');
+        alert('타일을 불러올 수 없습니다.\n\n【해결 방법】\n크롬을 CORS 해제 모드(--disable-web-security)로 실행하셨는지 확인해주세요.');
+        return;
+    }
+
+    var suffix=failed>0?' (타일 '+failed+'개 누락)':'';
+    downloadCanvas(offscreen,'PropMap_Z'+z+'_'+canvasW+'x'+canvasH,ext==='jpeg'?'jpeg':'png',ext==='jpeg'?'image/jpeg':'image/png');
+    setStatus('large','✅ 저장 완료 — '+canvasW.toLocaleString()+'×'+canvasH.toLocaleString()+'px'+suffix,'ok');
+}
+
+// ─────────────────────────────────────
+// 7. 유틸
+// ─────────────────────────────────────
+function showOverlay(msg,sub){
+    document.getElementById('overlay-msg').textContent=msg;
+    document.getElementById('overlay-sub').textContent=sub;
+    document.getElementById('overlay-prog-bar').style.width='0%';
+    document.getElementById('capture-overlay').classList.add('active');
+}
+function hideOverlay(){ document.getElementById('capture-overlay').classList.remove('active'); }
+function updateProgress(done,total){
+    var pct=Math.round(done/total*100);
+    document.getElementById('overlay-prog-bar').style.width=pct+'%';
+    document.getElementById('overlay-sub').textContent=done+' / '+total+' 타일 ('+pct+'%)';
+}
+function downloadCanvas(canvas,name,fmt,mime){
+    var now=new Date();
+    var ts=now.getFullYear()+('0'+(now.getMonth()+1)).slice(-2)+('0'+now.getDate()).slice(-2)
+          +'_'+('0'+now.getHours()).slice(-2)+('0'+now.getMinutes()).slice(-2);
+    var a=document.createElement('a');
+    a.download=name+'_'+ts+'.'+fmt;
+    a.href=canvas.toDataURL(mime,0.93);
+    a.click();
+}
+</script>
+</body>
+</html>
