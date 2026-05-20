@@ -1,1 +1,7 @@
 httpx
+pandas
+numpy
+requests
+urllib3
+pykrx
+finance-datareader
