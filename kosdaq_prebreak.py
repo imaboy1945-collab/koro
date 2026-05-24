@@ -35,35 +35,77 @@ MAX_WORKERS    = 8               # 병렬 처리 스레드 수
 # ─────────────────────────────────────────
 
 def get_kosdaq150() -> list[str]:
-    """KOSDAQ 150 구성 종목 코드 반환 (최근 5영업일 순차 시도)"""
+    """KOSDAQ 150 구성 종목 코드 반환
+    - 최근 10일 순차 시도 (주말·공휴일 포함)
+    - 폴백: 최근 5일 시가총액 상위 150개
+    - 최종 폴백: FinanceDataReader 코스닥 전체 상위 150개
+    """
+    import FinanceDataReader as fdr
+
     now = datetime.now(KST)
-    for delta in range(5):
+
+    # ── 1차: 지수 구성 종목 (최근 10일) ──────
+    for delta in range(10):
         date = (now - timedelta(days=delta)).strftime("%Y%m%d")
         try:
             tickers = stock.get_index_portfolio_deposit_file(KOSDAQ_150_IDX, date)
-            if tickers is not None and len(tickers) > 0:
-                if isinstance(tickers, pd.DataFrame):
-                    col = next((c for c in ("티커", "종목코드", "Code") if c in tickers.columns), None)
-                    result = tickers[col].astype(str).str.zfill(6).tolist() if col else []
-                elif isinstance(tickers, pd.Series):
-                    result = tickers.astype(str).str.zfill(6).tolist()
-                else:
-                    result = [str(t).zfill(6) for t in tickers]
+            if tickers is None:
+                continue
+            # DataFrame
+            if isinstance(tickers, pd.DataFrame) and not tickers.empty:
+                for col in ("티커", "종목코드", "Code", "code"):
+                    if col in tickers.columns:
+                        result = tickers[col].astype(str).str.zfill(6).tolist()
+                        if result:
+                            print(f"KOSDAQ 150 종목 {len(result)}개 로드 ({date})")
+                            return result
+                # 첫 번째 컬럼 시도
+                result = tickers.iloc[:, 0].astype(str).str.zfill(6).tolist()
+                if result:
+                    print(f"KOSDAQ 150 종목 {len(result)}개 로드 ({date})")
+                    return result
+            # Series
+            elif isinstance(tickers, pd.Series) and not tickers.empty:
+                result = tickers.astype(str).str.zfill(6).tolist()
+                if result:
+                    print(f"KOSDAQ 150 종목 {len(result)}개 로드 ({date})")
+                    return result
+            # List/iterable
+            elif hasattr(tickers, "__iter__"):
+                result = [str(t).zfill(6) for t in tickers if str(t).strip()]
                 if result:
                     print(f"KOSDAQ 150 종목 {len(result)}개 로드 ({date})")
                     return result
         except Exception as e:
-            print(f"[경고] KOSDAQ 150 조회 실패 ({date}): {e}")
+            print(f"[경고] 지수 조회 실패 ({date}): {e}")
 
-    # 폴백: 시가총액 상위 150개
-    print("[경고] KOSDAQ 150 지수 조회 실패 → 코스닥 시가총액 상위 150개로 대체")
+    # ── 2차 폴백: 시가총액 상위 150개 (최근 5일) ─
+    print("[경고] 지수 조회 실패 → 시가총액 상위 150개로 대체")
+    for delta in range(5):
+        date = (now - timedelta(days=delta)).strftime("%Y%m%d")
+        try:
+            df = stock.get_market_cap_by_ticker(date, market="KOSDAQ")
+            if df is not None and not df.empty:
+                result = df.sort_values("시가총액", ascending=False).head(150).index.tolist()
+                if result:
+                    print(f"시가총액 상위 150개 로드 ({date})")
+                    return result
+        except Exception as e:
+            print(f"[경고] 시가총액 조회 실패 ({date}): {e}")
+
+    # ── 3차 폴백: FinanceDataReader ──────────
+    print("[경고] 시가총액 조회 실패 → FinanceDataReader 코스닥 상위 150개로 대체")
     try:
-        today = now.strftime("%Y%m%d")
-        df = stock.get_market_cap_by_ticker(today, market="KOSDAQ")
-        return df.sort_values("시가총액", ascending=False).head(150).index.tolist()
+        listing = fdr.StockListing("KOSDAQ")
+        if listing is not None and not listing.empty and "Code" in listing.columns:
+            result = listing["Code"].dropna().astype(str).str.zfill(6).head(150).tolist()
+            if result:
+                print(f"FDR 코스닥 종목 {len(result)}개 로드")
+                return result
     except Exception as e:
-        print(f"[오류] 폴백 조회 실패: {e}")
-        return []
+        print(f"[오류] FDR 조회 실패: {e}")
+
+    return []
 
 # ─────────────────────────────────────────
 # OHLCV 수집
