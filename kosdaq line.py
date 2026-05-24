@@ -1,159 +1,305 @@
+"""
+KOSDAQ 150 사전 발굴 스캐너
+- 이미 터진 종목이 아닌, 올라가기 전 종목을 선별
+- 6가지 사전 신호 점수화 → 4점 이상 텔레그램 발송
+- 실행 시각: 15:30 KST (장 마감 직후)
+"""
+
 import os
-import FinanceDataReader as fdr
+import time
 import requests
-from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pykrx import stock
 
-# ==========================================
-# 1. 텔레그램 봇 설정 (GitHub Secrets 연동)
-# ==========================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+# ─────────────────────────────────────────
+# 환경변수
+# ─────────────────────────────────────────
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-def send_telegram(message):
-    """텔레그램 메시지 전송 함수"""
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("텔레그램 토큰이나 챗 아이디가 설정되지 않아 전송을 건너뜁니다.")
+# ─────────────────────────────────────────
+# 상수
+# ─────────────────────────────────────────
+KST            = timezone(timedelta(hours=9))
+KOSDAQ_150_IDX = "2203"          # pykrx KOSDAQ 150 지수 코드
+HIST_DAYS      = 70              # 기술 지표 계산용 과거 일수
+MIN_SCORE      = 4               # 최소 알림 점수 (6점 만점)
+MAX_RESULTS    = 10              # 최대 알림 종목 수
+MAX_WORKERS    = 8               # 병렬 처리 스레드 수
+
+# ─────────────────────────────────────────
+# 유니버스: KOSDAQ 150 종목 수집
+# ─────────────────────────────────────────
+
+def get_kosdaq150() -> list[str]:
+    """KOSDAQ 150 구성 종목 코드 반환 (최근 5영업일 순차 시도)"""
+    now = datetime.now(KST)
+    for delta in range(5):
+        date = (now - timedelta(days=delta)).strftime("%Y%m%d")
+        try:
+            tickers = stock.get_index_portfolio_deposit_file(KOSDAQ_150_IDX, date)
+            if tickers is not None and len(tickers) > 0:
+                if isinstance(tickers, pd.DataFrame):
+                    col = next((c for c in ("티커", "종목코드", "Code") if c in tickers.columns), None)
+                    result = tickers[col].astype(str).str.zfill(6).tolist() if col else []
+                elif isinstance(tickers, pd.Series):
+                    result = tickers.astype(str).str.zfill(6).tolist()
+                else:
+                    result = [str(t).zfill(6) for t in tickers]
+                if result:
+                    print(f"KOSDAQ 150 종목 {len(result)}개 로드 ({date})")
+                    return result
+        except Exception as e:
+            print(f"[경고] KOSDAQ 150 조회 실패 ({date}): {e}")
+
+    # 폴백: 시가총액 상위 150개
+    print("[경고] KOSDAQ 150 지수 조회 실패 → 코스닥 시가총액 상위 150개로 대체")
+    try:
+        today = now.strftime("%Y%m%d")
+        df = stock.get_market_cap_by_ticker(today, market="KOSDAQ")
+        return df.sort_values("시가총액", ascending=False).head(150).index.tolist()
+    except Exception as e:
+        print(f"[오류] 폴백 조회 실패: {e}")
+        return []
+
+# ─────────────────────────────────────────
+# OHLCV 수집
+# ─────────────────────────────────────────
+
+def get_ohlcv(ticker: str, today: str) -> pd.DataFrame | None:
+    """종목 OHLCV (과거 HIST_DAYS일) 반환"""
+    from_date = (datetime.strptime(today, "%Y%m%d") - timedelta(days=HIST_DAYS)).strftime("%Y%m%d")
+    try:
+        df = stock.get_market_ohlcv_by_date(from_date, today, ticker)
+        if df is None or len(df) < 30:
+            return None
+        df = df.rename(columns={"시가": "open", "고가": "high", "저가": "low",
+                                  "종가": "close", "거래량": "volume"})
+        df = df.astype({"open": float, "high": float, "low": float,
+                         "close": float, "volume": float})
+        return df
+    except Exception as e:
+        print(f"[경고] {ticker} OHLCV 실패: {e}")
+        return None
+
+# ─────────────────────────────────────────
+# 지표 계산
+# ─────────────────────────────────────────
+
+def calc_rsi(close: pd.Series, period: int = 14) -> float:
+    delta    = close.diff()
+    gain     = delta.where(delta > 0, 0.0)
+    loss     = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, adjust=False).mean()
+    last_loss = float(avg_loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return float((100 - 100 / (1 + rs)).iloc[-1])
+
+
+def calc_macd(close: pd.Series) -> tuple[float, float]:
+    """(MACD값, MACD 5일 전 값) 반환"""
+    ema12  = close.ewm(span=12, adjust=False).mean()
+    ema26  = close.ewm(span=26, adjust=False).mean()
+    macd   = ema12 - ema26
+    return float(macd.iloc[-1]), float(macd.iloc[-6])
+
+
+def calc_bb_squeeze(close: pd.Series, period: int = 20) -> bool:
+    """볼린저밴드 수축 여부: 현재 밴드폭 < 최근 20일 평균 밴드폭"""
+    ma  = close.rolling(period).mean()
+    std = close.rolling(period).std()
+    bw  = ((ma + 2 * std) - (ma - 2 * std)) / ma  # 밴드폭 비율
+    if bw.isna().all():
+        return False
+    bw = bw.dropna()
+    return float(bw.iloc[-1]) < float(bw.iloc[-21:-1].mean())
+
+# ─────────────────────────────────────────
+# 6가지 사전 신호 점수화
+# ─────────────────────────────────────────
+
+def score_prebreak(df: pd.DataFrame) -> tuple[int, list[str]]:
+    """
+    사전 발굴 신호 점수 계산 (6점 만점)
+    반환: (점수, 신호 설명 리스트)
+    """
+    close  = df["close"]
+    volume = df["volume"]
+    score  = 0
+    signals: list[str] = []
+
+    # ① 저항선 직전: 현재가 ≥ 20일 최고가의 97%
+    high_20 = float(close.iloc[-21:-1].max())
+    cur     = float(close.iloc[-1])
+    if high_20 > 0 and cur >= high_20 * 0.97:
+        score += 1
+        ratio = cur / high_20 * 100
+        signals.append(f"저항선 직전 {ratio:.1f}%")
+
+    # ② 거래량 3일 연속 증가
+    if (volume.iloc[-1] > volume.iloc[-2] > volume.iloc[-3]):
+        score += 1
+        signals.append("거래량 3일 연속 증가")
+
+    # ③ MACD 0선 아래서 상승 수렴 중
+    macd_now, macd_5ago = calc_macd(close)
+    if macd_now < 0 and macd_now > macd_5ago:
+        score += 1
+        signals.append(f"MACD 상승 수렴 ({macd_now:.1f}↑)")
+
+    # ④ RSI 45~55 구간 (모멘텀 준비)
+    rsi = calc_rsi(close)
+    if 45.0 <= rsi <= 55.0:
+        score += 1
+        signals.append(f"RSI {rsi:.1f} (모멘텀 준비)")
+
+    # ⑤ 볼린저밴드 수축 (변동성 축소)
+    if calc_bb_squeeze(close):
+        score += 1
+        signals.append("볼린저밴드 수축")
+
+    # ⑥ MA5가 MA20에 수렴 (골든크로스 직전)
+    ma5  = float(close.rolling(5).mean().iloc[-1])
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma5_prev  = float(close.rolling(5).mean().iloc[-4])
+    ma20_prev = float(close.rolling(20).mean().iloc[-4])
+    gap_now  = ma20 - ma5
+    gap_prev = ma20_prev - ma5_prev
+    if 0 < gap_now < gap_prev and gap_now < ma20 * 0.03:
+        score += 1
+        signals.append(f"MA5·MA20 수렴 ({gap_now/ma20*100:.1f}%)")
+
+    return score, signals
+
+# ─────────────────────────────────────────
+# 종목 분석 (병렬 실행용)
+# ─────────────────────────────────────────
+
+def analyze(ticker: str, today: str) -> dict | None:
+    df = get_ohlcv(ticker, today)
+    if df is None:
+        return None
+
+    score, signals = score_prebreak(df)
+    if score < MIN_SCORE:
+        return None
+
+    try:
+        name = stock.get_market_ticker_name(ticker)
+    except Exception:
+        name = ticker
+
+    close = float(df["close"].iloc[-1])
+    prev  = float(df["close"].iloc[-2])
+    chg   = (close - prev) / prev * 100 if prev else 0.0
+
+    vol      = float(df["volume"].iloc[-1])
+    vol_avg  = float(df["volume"].iloc[-21:-1].mean())
+    vol_ratio = vol / vol_avg if vol_avg > 0 else 0.0
+
+    return {
+        "ticker":    ticker,
+        "name":      name,
+        "close":     close,
+        "chg":       chg,
+        "vol_ratio": vol_ratio,
+        "score":     score,
+        "signals":   signals,
+    }
+
+# ─────────────────────────────────────────
+# 텔레그램
+# ─────────────────────────────────────────
+
+def build_message(results: list[dict], ts: str) -> str:
+    lines = [
+        f"🔍 <b>KOSDAQ 150 사전 발굴 리포트</b> ({ts})\n",
+        "━━━━━━━━━━━━━━",
+        "<b>조건</b> ①저항선직전 ②거래량연속증가 ③MACD수렴",
+        "      ④RSI준비구간 ⑤BB수축 ⑥MA수렴 (6점 만점)\n",
+    ]
+    for i, r in enumerate(results, 1):
+        star = "⭐" * r["score"]
+        lines.append(
+            f"{i}. <b>{r['name']}</b> ({r['ticker']})  {star}"
+        )
+        lines.append(
+            f"   현재가 {r['close']:,.0f}원 | {r['chg']:+.1f}% | "
+            f"거래량 {r['vol_ratio']:.1f}배"
+        )
+        lines.append(f"   신호: {' / '.join(r['signals'])}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append("※ 사전 발굴 참고용 — 투자 판단은 본인 책임")
+    return "\n".join(lines)
+
+
+def send_telegram(message: str) -> None:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[오류] 텔레그램 환경변수 미설정")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message[:4096],
+            "parse_mode": "HTML",
+        }, timeout=10)
+        resp.raise_for_status()
+        print("텔레그램 발송 완료")
+    except Exception as e:
+        print(f"[오류] 텔레그램 발송 실패: {e}")
+
+# ─────────────────────────────────────────
+# 메인
+# ─────────────────────────────────────────
+
+def main():
+    now   = datetime.now(KST)
+    today = now.strftime("%Y%m%d")
+    ts    = now.strftime("%m/%d %H:%M")
+    print(f"[{ts}] KOSDAQ 150 사전 발굴 스캐너 시작")
+
+    # 1. KOSDAQ 150 종목 로드
+    tickers = get_kosdaq150()
+    if not tickers:
+        send_telegram("⚠️ KOSDAQ 150 종목 로드 실패")
+        return
+    print(f"분석 대상: {len(tickers)}종목")
+
+    # 2. 병렬 분석
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(analyze, t, today): t for t in tickers}
+        for i, future in enumerate(as_completed(futures), 1):
+            result = future.result()
+            if result:
+                results.append(result)
+            if i % 30 == 0:
+                print(f"  진행 {i}/{len(tickers)}")
+            time.sleep(0.02)
+
+    # 3. 점수 내림차순 정렬
+    results.sort(key=lambda x: (x["score"], x["vol_ratio"]), reverse=True)
+    results = results[:MAX_RESULTS]
+
+    print(f"조건 통과: {len(results)}종목")
+
+    # 4. 텔레그램 발송
+    if not results:
+        send_telegram(f"🔍 KOSDAQ 150 사전 발굴 ({ts})\n조건 충족 종목 없음")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
-    try:
-        requests.post(url, data=payload)
-    except Exception as e:
-        print(f"텔레그램 전송 중 오류 발생: {e}")
+    msg = build_message(results, ts)
+    send_telegram(msg)
 
-# ==========================================
-# 2. 신규: 이전 테스트 패턴 확인 함수
-# ==========================================
-def check_prior_test_pattern(df):
-    """
-    [조건 5] 최근 30일 이내 +15% 이상 장대양봉 존재 여부 확인
-    [조건 6] 그 이후 20일선 ±5% 이내로 되돌아온 적 있는지 확인
-    [조건 7] 어제 종가가 20일선 ±5% 이내인지 확인 (수렴 확인)
-    """
-    if len(df) < 30:
-        return False
 
-    # [조건 7] 어제 종가 기준 20일선 ±5% 이내 (오늘 돌파 직전에 수렴 상태였는지)
-    yesterday_close = df['Close'].iloc[-2]
-    ma20_yesterday = df['Close'].iloc[-21:-1].mean()
-    lower_band = ma20_yesterday * 0.95
-    upper_band = ma20_yesterday * 1.05
-
-    if not (lower_band <= yesterday_close <= upper_band):
-        return False
-
-    # [조건 5] 최근 30일 이내(오늘 제외)에서 +15% 장대양봉 탐색
-    # MA20 계산 여유를 위해 최소 20봉 이후부터 탐색
-    search_start = max(20, len(df) - 31)
-    test_candle_pos = None
-
-    for i in range(search_start, len(df) - 1):  # 오늘(마지막 봉) 제외
-        row = df.iloc[i]
-        if row['Change'] * 100 >= 15 and row['Close'] > row['Open']:
-            test_candle_pos = i
-            break  # 가장 오래된 것부터 탐색 (첫 번째 발견)
-
-    if test_candle_pos is None:
-        return False
-
-    # [조건 6] 테스트 양봉 이후 ~ 어제까지, 한 번이라도 20일선 ±5% 이내로 되돌아왔는지
-    for i in range(test_candle_pos + 1, len(df) - 1):  # 테스트 다음날 ~ 어제
-        close = df['Close'].iloc[i]
-        ma20 = df['Close'].iloc[i - 20:i].mean()
-        if ma20 * 0.95 <= close <= ma20 * 1.05:
-            return True  # 되돌림 확인됨
-
-    return False  # 되돌림 없이 계속 고공에 있거나 이탈한 경우
-
-# ==========================================
-# 3. 돌파매매 조건 검색 함수 (이격도 보조지표 포함)
-# ==========================================
-def get_breakout_stocks():
-    kosdaq_list = fdr.StockListing('KOSDAQ')
-
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=90)  # 기존 60일 → 90일로 확장 (패턴 탐색 여유분)
-
-    result_stocks = []
-
-    for idx, row in kosdaq_list.iterrows():
-        code = row['Code']
-        name = row['Name']
-
-        try:
-            df = fdr.DataReader(code, start_date, end_date)
-
-            if len(df) < 30:
-                continue
-
-            today = df.iloc[-1]
-            df_20 = df.iloc[-21:-1]
-
-            # [조건 1] 가격 기준: 20일 최고 종가 돌파
-            highest_close_20 = df_20['Close'].max()
-            if today['Close'] <= highest_close_20:
-                continue
-
-            # [조건 2] 거래량 기준: 20일 평균 대비 300% 폭증
-            avg_volume_20 = df_20['Volume'].mean()
-            if avg_volume_20 == 0 or today['Volume'] < (avg_volume_20 * 3):
-                continue
-
-            # [조건 3] 캔들 기준: 7% 이상 꽉 찬 양봉
-            change_percent = today['Change'] * 100
-            is_yangbong = today['Close'] > today['Open']
-            if not (change_percent >= 7 and is_yangbong):
-                continue
-
-            # [조건 4] 보조지표: 20일선 이격도 제한 (상투 방지)
-            ma20 = df['Close'].iloc[-20:].mean()
-            if today['Close'] > (ma20 * 1.20):
-                continue
-
-            # [조건 5,6,7] 신규: 이전 테스트 후 되돌림 패턴 확인
-            if not check_prior_test_pattern(df):
-                continue
-
-            # 리스트 추가
-            vol_multiple = today['Volume'] / avg_volume_20
-            disparity = (today['Close'] / ma20) * 100
-            result_stocks.append(
-                f"• <b>{name}</b> ({code}) | +{change_percent:.2f}% | 거래 {vol_multiple:.1f}배 | 이격도 {disparity:.1f}%"
-            )
-
-        except Exception:
-            continue
-
-    return result_stocks
-
-# ==========================================
-# 4. 메인 실행부 (메시지 조립 및 전송)
-# ==========================================
 if __name__ == "__main__":
-    print("스캐닝을 시작합니다. 코스닥 전 종목 조회로 약간의 시간이 소요됩니다...")
-
-    breakout_stocks = get_breakout_stocks()
-
-    intro_text = (
-        "🚀 <b>[코스닥 단기 스윙 돌파 포착]</b>\n\n"
-        "💡 <b>스캐너 조건 개요</b>\n"
-        "1. <b>가격:</b> 20일 최고가 돌파 (악성 매물대 돌파)\n"
-        "2. <b>수급:</b> 20일 평균 대비 거래량 3배 이상 폭증\n"
-        "3. <b>캔들:</b> +7% 이상 장대양봉 (강한 매수세 장악)\n"
-        "4. <b>안전:</b> 20일선 이격도 120% 미만 (고점 추격 방지)\n"
-        "5. <b>패턴:</b> 30일 이내 +15% 테스트 → 20일선 되돌림 → 재돌파\n"
-        "──────────────────\n\n"
-    )
-
-    if breakout_stocks:
-        final_message = intro_text + "\n".join(breakout_stocks)
-    else:
-        final_message = intro_text + "오늘은 모든 조건을 완벽하게 만족하는 강력한 돌파 종목이 없습니다."
-
-    send_telegram(final_message)
-    print("텔레그램 전송 완료!")
+    main()
