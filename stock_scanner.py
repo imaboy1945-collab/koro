@@ -240,6 +240,25 @@ def analyze_ticker(code: str, market: str) -> ScanResult | None:
     if ma20 == 0:
         return None
 
+    # ── 필수 조건: RSI 50 이상 (기준선 위) ──
+    close_s = close
+    delta    = close_s.diff()
+    gain     = delta.where(delta > 0, 0.0)
+    loss     = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, adjust=False).mean()
+    last_loss = float(avg_loss.iloc[-1])
+    rsi_val = 100.0 if last_loss == 0 else float((100 - 100/(1 + avg_gain/avg_loss)).iloc[-1])
+    if rsi_val < 50.0:
+        return None
+
+    # ── 필수 조건: MACD > 0 (기준선 위) ──
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_val = float((ema12 - ema26).iloc[-1])
+    if macd_val <= 0:
+        return None
+
     # ── 필수 조건 ②: MA20 이격도 110% 이하 ──
     disparity = cur / ma20
     if disparity > 1.10:
@@ -307,7 +326,7 @@ def analyze_ticker(code: str, market: str) -> ScanResult | None:
         score += 10
     elif disparity <= 1.07:
         score += 5
-    signals.append(f"이격도 {disparity*100:.1f}%")
+    signals.append(f"RSI {rsi_val:.1f} | MACD {"▲" if macd_val > 0 else "▼"}{macd_val:.1f} | 이격도 {disparity*100:.1f}%")
 
     # 오늘 캔들 윗꼬리 없음 보너스 (10점) — 10% 미만일 때
     today_body2 = today_c - today_o
