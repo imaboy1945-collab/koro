@@ -285,7 +285,15 @@ def send_telegram(message: str) -> None:
 def build_message(candidates: list, timestamp: str) -> str:
     grade_emoji = {"A": "🟢", "B": "🟡", "C": "🔴"}
 
-    lines = [f"📋 <b>오늘의 종가매매 후보</b> ({timestamp})\n"]
+    lines = [
+        f"📋 <b>종가매매봇</b> ({timestamp})",
+        "",
+        "⏰ <b>실행</b> 14:50 KST | 대상 KOSPI·KOSDAQ 전체",
+        "📐 <b>기준</b> RSI 50↑ + MACD 기준선 위 + 5일선 위 + 거래량 1.5배↑",
+        "💡 <b>전략</b> 오늘 3시 장 마감 전 매수 → 당일~단기 보유",
+        "━━━━━━━━━━━━━━",
+        "",
+    ]
 
     for i, r in enumerate(candidates, 1):
         emoji = grade_emoji.get(r.get("news_grade", "C"), "⚪")
