@@ -341,14 +341,20 @@ def send_telegram(message: str, dry_run: bool = False) -> bool:
 
 
 def build_report(results: list[ScanResult], ts: str) -> str:
-    title = f"🎯 <b>[인베스트웰스] 눌림목 스나이퍼 리포트</b>"
-    header = (
-        f"{title}\n"
-        f"기준: {ts} KST\n"
-        "━━━━━━━━━━━━━━\n"
-        "<b>전략</b> 윗꼬리 없는 장대양봉 발생 후\n"
-        "      MA10·MA20 눌림목 진입 타점 포착\n"
-    )
+    header_lines = [
+        f"🎯 <b>눌림목 스나이퍼</b>",
+        "",
+        f"⏰ <b>실행</b> 15:45 KST | 대상 KOSPI 200 + KOSDAQ 150",
+        "📐 <b>기준</b> 최근 10일 내 윗꼬리 없는 장대양봉 발생",
+        "   (몸통 70%↑ · 윗꼬리 10%↓ · 상승 3%↑)",
+        "   + 현재가 MA10 또는 MA20 ±2% 이내 눌림",
+        "   + MA20 이격도 110% 이하",
+        "💡 <b>전략</b> 세력 개입 캔들 확인 후 첫 눌림목 진입",
+        "   (윗꼬리=세력 현금화 신호 → 꼬리 없을 때만 유효)",
+        f"기준시각: {ts} KST",
+        "━━━━━━━━━━━━━━",
+    ]
+    header = "\n".join(header_lines) + "\n"
 
     if not results:
         return header + f"\n현재 {MIN_SCORE}점 이상 조건 충족 종목 없음\n\n상세: {BLOG_URL}"
