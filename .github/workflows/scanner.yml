@@ -1,33 +1,30 @@
-name: KOSDAQ Breakout Scanner
+name: KOSDAQ 사전 발굴 스캐너
 
 on:
   schedule:
-    # 한국 시간(KST) 15:30 = UTC 06:30
-    # 월~금요일(1-5) 장 마감 시간에 자동 실행
-    - cron: '30 6 * * 1-5'
+    # 15:30 KST = 06:30 UTC, 월~금
+    - cron: "30 6 * * 1-5"
   workflow_dispatch:
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4.2.2
 
-    - name: Set up Python
-      uses: actions/setup-python@v5.6.0
-      with:
-        python-version: "3.11"
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run KOSDAQ breakout scanner
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python "kosdaq line.py"
+      - name: 사전 발굴 스캐너 실행
+        run: python kosdaq_prebreak.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
