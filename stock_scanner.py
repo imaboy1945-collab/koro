@@ -326,7 +326,8 @@ def analyze_ticker(code: str, market: str) -> ScanResult | None:
         score += 10
     elif disparity <= 1.07:
         score += 5
-    signals.append(f"RSI {rsi_val:.1f} | MACD {"▲" if macd_val > 0 else "▼"}{macd_val:.1f} | 이격도 {disparity*100:.1f}%")
+    macd_arrow = "▲" if macd_val > 0 else "▼"
+    signals.append(f"RSI {rsi_val:.1f} | MACD {macd_arrow}{macd_val:.1f} | 이격도 {disparity*100:.1f}%")
 
     # 오늘 캔들 윗꼬리 없음 보너스 (10점) — 10% 미만일 때
     today_body2 = today_c - today_o
