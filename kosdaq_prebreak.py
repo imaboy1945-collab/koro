@@ -261,10 +261,16 @@ def analyze(ticker: str, today: str) -> dict | None:
 
 def build_message(results: list[dict], ts: str) -> str:
     lines = [
-        f"🔍 <b>KOSDAQ 150 사전 발굴 리포트</b> ({ts})\n",
+        f"🔍 <b>KOSDAQ 사전발굴봇</b> ({ts})",
+        "",
+        "⏰ <b>실행</b> 15:30 KST | 대상 KOSDAQ 150",
+        "📐 <b>기준</b> 6가지 신호 중 4개 이상 동시 충족",
+        "   ①저항선 직전(97%↑) ②거래량 3일 연속증가",
+        "   ③MACD 0선 하방 수렴 ④RSI 45~55",
+        "   ⑤볼린저밴드 수축 ⑥MA5·MA20 수렴",
+        "💡 <b>전략</b> 아직 안 터진 종목 미리 포착 → 내일 상승 대비",
         "━━━━━━━━━━━━━━",
-        "<b>조건</b> ①저항선직전 ②거래량연속증가 ③MACD수렴",
-        "      ④RSI준비구간 ⑤BB수축 ⑥MA수렴 (6점 만점)\n",
+        "",
     ]
     for i, r in enumerate(results, 1):
         star = "⭐" * r["score"]
