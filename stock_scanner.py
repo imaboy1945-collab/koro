@@ -186,7 +186,7 @@ def find_trigger_candle(df: pd.DataFrame, lookback: int = 10) -> tuple[bool, int
     조건:
       - 양봉 (close > open)
       - 몸통 >= 전체 캔들 70% (body_ratio >= 0.7)
-      - 윗꼬리 <= 전체 캔들 10% (wick_ratio <= 0.1)
+      - 윗꼬리 <= 전체 캔들 5% (wick_ratio <= 0.05)
       - 상승폭 >= 3%
     """
     for i in range(2, lookback + 2):   # 오늘([-1]) 제외, 최근 10일
@@ -210,7 +210,7 @@ def find_trigger_candle(df: pd.DataFrame, lookback: int = 10) -> tuple[bool, int
         chg_pct    = body / o * 100
 
         if (body > 0 and            # 양봉
-                wick_ratio <= 0.10 and  # 윗꼬리 10% 미만
+                wick_ratio <= 0.05 and  # 윗꼬리 5% 미만 (강화)
                 body_ratio >= 0.70 and  # 몸통 70% 이상
                 chg_pct >= 3.0):        # 최소 3% 상승
             days_ago = i - 1
@@ -248,6 +248,26 @@ def analyze_ticker(code: str, market: str) -> ScanResult | None:
     # ── 필수 조건 ①③: 트리거 캔들 + 눌림목 ──
     found, days_ago, trigger_pct = find_trigger_candle(df, lookback=10)
     if not found:
+        return None
+
+    # ── 필수 조건: 오늘 캔들 윗꼬리 30% 초과 시 제외 ──
+    today_h    = float(high.iloc[-1])
+    today_l    = float(low.iloc[-1])
+    today_c    = float(close.iloc[-1])
+    today_o    = float(open_.iloc[-1])
+    today_len  = today_h - today_l
+    today_wick = today_h - today_c
+    if today_len > 0 and today_wick / today_len > 0.30:
+        return None  # 오늘 캔들 윗꼬리가 30% 초과 → 매도 압력 강함
+
+    # ── 필수 조건: 실제 눌림 확인 (현재가 < 트리거 캔들 종가) ──
+    # 트리거 캔들 종가 추출
+    trigger_idx = -(days_ago + 1)
+    try:
+        trigger_close = float(close.iloc[trigger_idx])
+        if cur >= trigger_close:
+            return None  # 아직 안 빠졌으면 눌림목 아님
+    except IndexError:
         return None
 
     # ── 필수 조건 ③: MA10 또는 MA20 ±2% 이내 ──
@@ -289,14 +309,11 @@ def analyze_ticker(code: str, market: str) -> ScanResult | None:
         score += 5
     signals.append(f"이격도 {disparity*100:.1f}%")
 
-    # 오늘 캔들도 윗꼬리 없음 보너스 (10점)
-    today_body = float(close.iloc[-1]) - float(open_.iloc[-1])
-    today_len  = float(high.iloc[-1]) - float(low.iloc[-1])
-    if today_len > 0 and today_body > 0:
-        today_wick = float(high.iloc[-1]) - float(close.iloc[-1])
-        if today_wick / today_len <= 0.10:
-            score += 10
-            signals.append("당일 캔들도 윗꼬리 없음")
+    # 오늘 캔들 윗꼬리 없음 보너스 (10점) — 10% 미만일 때
+    today_body2 = today_c - today_o
+    if today_len > 0 and today_wick / today_len <= 0.10:
+        score += 10
+        signals.append("당일 캔들 윗꼬리 없음")
 
     # 거래량 보너스 (10점)
     vol_ma20  = float(volume.rolling(20).mean().iloc[-1])
