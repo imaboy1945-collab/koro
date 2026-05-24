@@ -1,0 +1,68 @@
+# 기존 .github/workflows/stock_brief.yml 에 아래 job을 추가하세요.
+# 전체 파일 구조 예시도 함께 포함되어 있습니다.
+
+# ──────────────────────────────────────────────────────────────
+# 전체 워크플로 파일 예시 (.github/workflows/stock_brief.yml)
+# ──────────────────────────────────────────────────────────────
+
+name: 주식 알림봇
+
+on:
+  schedule:
+    # 장전 브리핑: 08:30 KST = 23:30 UTC (전날)
+    - cron: "30 23 * * 0-4"
+    # 장후 브리핑: 16:00 KST = 07:00 UTC
+    - cron: "0 7 * * 1-5"
+    # 종가매매 알림: 14:50 KST = 05:50 UTC
+    - cron: "50 5 * * 1-5"
+  workflow_dispatch:  # 수동 실행 허용
+
+jobs:
+
+  # ── 기존: 장전·장후 브리핑 ──────────────────────────────────
+  brief:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.schedule == '30 23 * * 0-4') ||
+      (github.event.schedule == '0 7 * * 1-5')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 패키지 설치
+        run: |
+          pip install pykrx finance-datareader pandas requests \
+                      google-genai
+      - name: 브리핑 실행
+        run: python brief.py
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+
+  # ── 신규: 종가매매 알림 (14:50 KST) ────────────────────────
+  closing-alert:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '50 5 * * 1-5'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: |
+          pip install pykrx finance-datareader pandas numpy requests \
+                      google-genai
+
+      - name: 종가매매 알림 실행
+        run: python closing_alert.py
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
