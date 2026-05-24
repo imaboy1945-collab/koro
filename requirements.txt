@@ -5,3 +5,4 @@ requests
 urllib3
 pykrx
 finance-datareader
+google-genai
