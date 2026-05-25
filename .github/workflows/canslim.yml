@@ -21,7 +21,7 @@ jobs:
           pip install -r requirements.txt
           pip install beautifulsoup4
       - name: 인사이트스캐너 실행
-        run: python insight scanner.py
+        run: python "insight scanner.py"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
