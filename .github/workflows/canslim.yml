@@ -1,4 +1,4 @@
-name: CAN SLIM 모멘텀 스캐너
+name: 인사이트스캐너
 
 on:
   schedule:
