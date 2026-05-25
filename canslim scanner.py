@@ -456,27 +456,38 @@ def enrich_with_naver(candidate):
 # ─────────────────────────────────────────
 def build_investment_guide(r):
     """
-    5단계 매뉴얼 기반 투자 가이드 생성
-    종목별 ATR 손절가 + 피보나치 목표가 포함
+    5단계 매뉴얼 기반 투자 가이드
+    분할매수 4단계 + 손절 + 목표가 모두 포함
     """
-    price     = r["price"]
-    stop_2x   = r["stop_2x"]
-    stop_3x   = r["stop_3x"]
-    fib1      = r["fib1"]
-    fib2      = r["fib2"]
-    atr       = r["atr"]
+    price    = r["price"]
+    stop_2x  = r["stop_2x"]
+    stop_3x  = r["stop_3x"]
+    fib1     = r["fib1"]
+    fib2     = r["fib2"]
+    atr      = r["atr"]
+
+    # 추가매수 가격 레벨 계산
+    add2 = round(price * 1.03, -1)   # 2차: +3% 돌파 확인
+    add3 = round(price * 1.06, -1)   # 3차: +6% (1차 목표 근처 눌림)
+    add4 = round(fib1  * 0.97, -1)   # 4차: 1차 목표 돌파 후 눌림
+
     risk_pct  = abs(price - stop_2x) / price * 100
+    rr_ratio  = (fib1 - price) / max(price - stop_2x, 1)
 
     lines = [
-        "   📐 <b>투자 가이드</b>",
-        f"   ├ 1차 진입: 목표 물량의 25% 선매수 (정찰병)",
-        f"   ├ 추가 진입: 상승 파동 확인 or 눌림목 반등 시",
-        f"   ├ 손절(2×ATR): {stop_2x:,.0f}원  "
-        f"(현재가 -{risk_pct:.1f}%, ATR={atr:,.0f}원)",
-        f"   ├ 손절(3×ATR): {stop_3x:,.0f}원  (노이즈 허용 시)",
-        f"   ├ 1차 목표: {fib1:,.0f}원  (피보나치 1:1 확장)",
-        f"   ├ 2차 목표: {fib2:,.0f}원  (피보나치 1.618 확장)",
-        f"   └ 포지션 크기: 손실액이 총자산 1~2% 이내로 조절",
+        "   📐 <b>분할매수 전략</b>",
+        f"   ├ 1차 (25%): {price:,.0f}원  ← 지금 (정찰병 진입)",
+        f"   ├ 2차 (25%): {add2:,.0f}원  ← +3% 돌파 확인 시",
+        f"   ├ 3차 (25%): {add3:,.0f}원  ← +6% 추세 가속 확인",
+        f"   ├ 4차 (25%): {add4:,.0f}원  ← 1차 목표 돌파 후 눌림",
+        f"   │",
+        f"   ├ 🛑 손절(2×ATR): {stop_2x:,.0f}원  (-{risk_pct:.1f}%, ATR={atr:,.0f}원)",
+        f"   ├ 🛑 손절(3×ATR): {stop_3x:,.0f}원  (노이즈 허용 시)",
+        f"   │",
+        f"   ├ 🎯 1차 목표: {fib1:,.0f}원  (피보나치 1:1 확장, 여기서 절반 익절)",
+        f"   ├ 🎯 2차 목표: {fib2:,.0f}원  (피보나치 1.618 확장)",
+        f"   ├ 손익비: {rr_ratio:.1f}:1",
+        f"   └ 포지션 크기: 단일 손실 총자산 1~2% 이내",
     ]
     return "\n".join(lines)
 
