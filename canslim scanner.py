@@ -1,5 +1,5 @@
 """
-CAN SLIM 모멘텀 스캐너
+인사이트스캐너
 5단계 매뉴얼 기반: 펀더멘털 필터 → 기술적 수렴 → 리스크 관리 자동 계산
 데이터: pykrx(OHLCV·수급) + Naver Finance(ROE·외국인지분율·PER)
 실행: 16:10 KST (장 마감 확정 데이터)
@@ -483,7 +483,7 @@ def build_investment_guide(r):
 
 def build_report(results, ts):
     header = (
-        f"🚀 <b>CAN SLIM 모멘텀 스캐너</b>\n"
+        f"🚀 <b>인사이트스캐너</b>\n"
         f"⏰ {ts} KST | KOSPI 200 + KOSDAQ 150\n"
         "━━━━━━━━━━━━━━\n"
         "📐 <b>5단계 필터</b>\n"
