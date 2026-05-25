@@ -392,14 +392,31 @@ def analyze_ticker(code, market_label):
         score += 15
         signals.append("RSI 강세 다이버전스 감지")
 
+    # 피보나치 되돌림 레벨 계산 (현재가 기준 하방)
+    # 현재가 ~ 최근 저점 상승폭으로 계산 → 레벨이 항상 현재가 아래
+    recent_low  = float(low.iloc[-30:].min())
+    up_move     = cur - recent_low          # 현재가까지 올라온 폭
+    fib_236     = round(cur - up_move * 0.236, -1)
+    fib_382     = round(cur - up_move * 0.382, -1)
+    fib_618     = round(cur - up_move * 0.618, -1)
+
+    # 안전장치: 레벨이 stop_2x보다 낮아지면 stop_2x 위로 조정
+    if fib_618 < stop_2x:
+        fib_618 = stop_2x
+    if fib_382 < fib_618:
+        fib_382 = round((cur + fib_618) / 2, -1)
+    if fib_236 < fib_382:
+        fib_236 = round((cur + fib_382) / 2, -1)
+
     return {
         "code": code, "name": get_stock_name(code), "market": market_label,
         "price": cur, "change": change, "score": score,
-        "ma120": ma120, "obv_signal": obv_signal,
+        "ma120": ma120, "ma20": ma20, "obv_signal": obv_signal,
         "rsi_val": rsi_val, "rsi_diverge": rsi_diverge,
         "atr": atr_val, "stop_2x": stop_2x, "stop_3x": stop_3x,
-        "fib1": fib1, "fib2": fib2, "signals": signals,
-        # Naver 데이터는 필터 통과 후 별도 조회 (속도 최적화)
+        "fib1": fib1, "fib2": fib2,
+        "fib_236": fib_236, "fib_382": fib_382, "fib_618": fib_618,
+        "signals": signals,
         "roe": 0.0, "per": 0.0, "foreign_ratio": 0.0,
     }
 
@@ -456,36 +473,36 @@ def enrich_with_naver(candidate):
 # ─────────────────────────────────────────
 def build_investment_guide(r):
     """
-    5단계 매뉴얼 기반 투자 가이드
-    분할매수 4단계 + 손절 + 목표가 모두 포함
+    눌림목 분할매수 전략
+    피보나치 되돌림 기반으로 매수 구간과 손절 구간 명확히 분리
+    규칙: 마지막 추가매수(38.2%) > 손절(61.8%) 항상 유지
     """
-    price    = r["price"]
-    stop_2x  = r["stop_2x"]
-    stop_3x  = r["stop_3x"]
-    fib1     = r["fib1"]
-    fib2     = r["fib2"]
-    atr      = r["atr"]
+    price   = r["price"]
+    fib1    = r["fib1"]
+    fib2    = r["fib2"]
+    atr     = r["atr"]
+    fib_236 = r.get("fib_236", round(price * 0.976, -1))
+    fib_382 = r.get("fib_382", round(price * 0.962, -1))
+    fib_618 = r.get("fib_618", round(price * 0.938, -1))
 
-    # 추가매수 가격 레벨 계산
-    add2 = round(price * 1.03, -1)   # 2차: +3% 돌파 확인
-    add3 = round(price * 1.06, -1)   # 3차: +6% (1차 목표 근처 눌림)
-    add4 = round(fib1  * 0.97, -1)   # 4차: 1차 목표 돌파 후 눌림
+    # 손절은 반드시 마지막 매수(38.2%)보다 아래
+    stop = fib_618   # 61.8% 이탈 = 추세 이탈 기준
 
-    risk_pct  = abs(price - stop_2x) / price * 100
-    rr_ratio  = (fib1 - price) / max(price - stop_2x, 1)
+    risk_pct = abs(price - stop) / price * 100
+    gap_pct  = abs(fib_382 - stop) / price * 100  # 마지막매수~손절 간격
+    rr_ratio = (fib1 - price) / max(price - stop, 1)
 
     lines = [
-        "   📐 <b>분할매수 전략</b>",
-        f"   ├ 1차 (25%): {price:,.0f}원  ← 지금 (정찰병 진입)",
-        f"   ├ 2차 (25%): {add2:,.0f}원  ← +3% 돌파 확인 시",
-        f"   ├ 3차 (25%): {add3:,.0f}원  ← +6% 추세 가속 확인",
-        f"   ├ 4차 (25%): {add4:,.0f}원  ← 1차 목표 돌파 후 눌림",
+        "   📐 <b>눌림목 분할매수 전략</b>",
+        f"   ├ 1차 (34%): {price:,.0f}원  ← 지금 진입 (정찰병)",
+        f"   ├ 2차 (33%): {fib_236:,.0f}원  ← 23.6% 되돌림 (1차 조정)",
+        f"   ├ 3차 (33%): {fib_382:,.0f}원  ← 38.2% 되돌림 (정상 조정)",
+        f"   ├ ─────── 매수 구간 끝 / 손절 구간 시작 ───────",
+        f"   ├ 🛑 손절: {stop:,.0f}원  (61.8% 이탈, -{risk_pct:.1f}%)",
+        f"   ├    ↳ 3차 매수 ~ 손절 간격: {gap_pct:.1f}% (명확한 분리)",
         f"   │",
-        f"   ├ 🛑 손절(2×ATR): {stop_2x:,.0f}원  (-{risk_pct:.1f}%, ATR={atr:,.0f}원)",
-        f"   ├ 🛑 손절(3×ATR): {stop_3x:,.0f}원  (노이즈 허용 시)",
-        f"   │",
-        f"   ├ 🎯 1차 목표: {fib1:,.0f}원  (피보나치 1:1 확장, 여기서 절반 익절)",
-        f"   ├ 🎯 2차 목표: {fib2:,.0f}원  (피보나치 1.618 확장)",
+        f"   ├ 🎯 1차 목표: {fib1:,.0f}원  (1:1 확장, 절반 익절)",
+        f"   ├ 🎯 2차 목표: {fib2:,.0f}원  (1.618 확장)",
         f"   ├ 손익비: {rr_ratio:.1f}:1",
         f"   └ 포지션 크기: 단일 손실 총자산 1~2% 이내",
     ]
