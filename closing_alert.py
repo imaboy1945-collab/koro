@@ -7,10 +7,11 @@
 import os
 import time
 import json
+import re
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pykrx import stock
 from google import genai
 from google.genai import types
@@ -35,6 +36,21 @@ PRICE_CHG_MAX   = 12.0        # 당일 상승률 상한 (%)
 RSI_MIN         = 50.0        # RSI 하한 (기준선 위)
 RSI_MAX         = 70.0        # RSI 상한 (과매수 전)
 PREFILTER_TOP_N = 80          # 1차 빠른 필터 통과 후 상세 분석 대상 최대 수
+KST             = timezone(timedelta(hours=9))
+SNAPSHOT_FALLBACK_PAGES = int(os.environ.get("SNAPSHOT_FALLBACK_PAGES", "3"))
+
+COL_OPEN   = "\uc2dc\uac00"
+COL_HIGH   = "\uace0\uac00"
+COL_LOW    = "\uc800\uac00"
+COL_CLOSE  = "\uc885\uac00"
+COL_VOLUME = "\uac70\ub798\ub7c9"
+COL_AMOUNT = "\uac70\ub798\ub300\uae08"
+COL_CHANGE = "\ub4f1\ub77d\ub960"
+
+NAVER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://finance.naver.com",
+}
 
 # ─────────────────────────────────────────
 # 지표 계산 함수
@@ -77,13 +93,80 @@ def get_today_snapshot(market: str, today: str) -> pd.DataFrame:
     """
     try:
         df = stock.get_market_ohlcv_by_ticker(today, market=market)
+        if df is None or df.empty:
+            print(f"[warn] {market} ticker snapshot is empty; trying history fallback")
+            return get_today_snapshot_from_history(market, today)
         df.index.name = "ticker"
         df = df.reset_index()
         df["market"] = market
         return df
     except Exception as e:
-        print(f"[경고] {market} 스냅샷 수집 실패: {e}")
+        print(f"[warn] {market} ticker snapshot failed: {e}; trying history fallback")
+        return get_today_snapshot_from_history(market, today)
+
+
+def get_naver_market_tickers(market: str, pages: int = SNAPSHOT_FALLBACK_PAGES) -> list[str]:
+    """Naver market-cap pages provide a lightweight fallback ticker universe."""
+    sosok = {"KOSPI": 0, "KOSDAQ": 1}.get(market)
+    if sosok is None:
+        return []
+
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for page in range(1, pages + 1):
+        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+        try:
+            resp = requests.get(url, headers=NAVER_HEADERS, timeout=10)
+            resp.raise_for_status()
+            for code in re.findall(r"/item/main\.naver\?code=(\d{6})", resp.text):
+                if code not in seen:
+                    seen.add(code)
+                    tickers.append(code)
+        except Exception as e:
+            print(f"[warn] {market} Naver ticker page {page} failed: {e}")
+    return tickers
+
+
+def get_today_snapshot_from_history(market: str, today: str) -> pd.DataFrame:
+    """
+    Fallback for get_market_ohlcv_by_ticker outages.
+    Builds a same-shape snapshot from per-ticker historical OHLCV rows.
+    """
+    tickers = get_naver_market_tickers(market)
+    if not tickers:
         return pd.DataFrame()
+
+    from_date = (datetime.strptime(today, "%Y%m%d") - timedelta(days=HIST_DAYS)).strftime("%Y%m%d")
+    rows = []
+    for ticker in tickers:
+        try:
+            hist = stock.get_market_ohlcv_by_date(from_date, today, ticker)
+            if hist is None or hist.empty:
+                continue
+            last = hist.iloc[-1]
+            close = float(last.get(COL_CLOSE, 0) or 0)
+            volume = float(last.get(COL_VOLUME, 0) or 0)
+            prev_close = float(hist.iloc[-2].get(COL_CLOSE, close) or close) if len(hist) > 1 else close
+            change = last.get(COL_CHANGE)
+            if pd.isna(change):
+                change = ((close - prev_close) / prev_close * 100) if prev_close else 0.0
+            rows.append({
+                "ticker": ticker,
+                "market": market,
+                COL_OPEN: float(last.get(COL_OPEN, 0) or 0),
+                COL_HIGH: float(last.get(COL_HIGH, 0) or 0),
+                COL_LOW: float(last.get(COL_LOW, 0) or 0),
+                COL_CLOSE: close,
+                COL_VOLUME: volume,
+                COL_AMOUNT: float(last.get(COL_AMOUNT, close * volume) or 0),
+                COL_CHANGE: float(change),
+            })
+        except Exception as e:
+            print(f"[warn] {market} {ticker} history snapshot failed: {e}")
+        time.sleep(0.02)
+
+    print(f"{market} history fallback snapshot: {len(rows)} rows")
+    return pd.DataFrame(rows)
 
 
 def get_investor_flow(market: str, today: str) -> pd.DataFrame:
@@ -322,7 +405,7 @@ def build_message(candidates: list, timestamp: str) -> str:
 # ─────────────────────────────────────────
 
 def main():
-    now   = datetime.now()
+    now   = datetime.now(KST)
     today = now.strftime("%Y%m%d")
     ts    = now.strftime("%m/%d %H:%M")
     print(f"[{ts}] 종가매매 알림봇 시작 — 대상일: {today}")
