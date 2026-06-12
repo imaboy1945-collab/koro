@@ -2,7 +2,8 @@ name: 종가매매 알림봇
 
 on:
   schedule:
-    - cron: "50 5 * * 1-5"
+    # 14:35 KST = 05:35 UTC (Actions 실행 지연 감안, 마감 전 도착 여유 확보)
+    - cron: "35 5 * * 1-5"
   workflow_dispatch:
 
 jobs:

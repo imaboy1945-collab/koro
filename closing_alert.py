@@ -1,6 +1,6 @@
 """
 종가매매법 텔레그램 알림봇
-실행 시각: 매일 14:50 KST (GitHub Actions cron)
+실행 시각: 매일 14:35 KST (GitHub Actions cron — 실행 지연을 감안해 마감 전 여유 확보)
 흐름: 데이터 수집 → 1차 기술적 필터 → LLM 분석 → 텔레그램 발송
 """
 
@@ -57,12 +57,12 @@ NAVER_HEADERS = {
 # ─────────────────────────────────────────
 
 def calc_rsi(close: pd.Series, period: int = 14) -> float:
-    """RSI 계산 — 마지막 값 반환 (avg_loss=0이면 RSI=100)"""
+    """RSI 계산 (Wilder 방식) — 마지막 값 반환 (avg_loss=0이면 RSI=100)"""
     delta    = close.diff()
     gain     = delta.where(delta > 0, 0.0)
     loss     = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     last_loss = float(avg_loss.iloc[-1])
     if last_loss == 0:
         return 100.0
@@ -191,9 +191,10 @@ def prefilter(snapshot: pd.DataFrame) -> pd.DataFrame:
     """
     # pykrx 컬럼 표준화
     rename = {
-        "등락률": "price_chg",
-        "거래량": "volume",
-        "종가":   "close",
+        "등락률":   "price_chg",
+        "거래량":   "volume",
+        "종가":     "close",
+        "거래대금": "amount",
     }
     df = snapshot.rename(columns=rename)
 
@@ -203,19 +204,29 @@ def prefilter(snapshot: pd.DataFrame) -> pd.DataFrame:
         (df["price_chg"] <= PRICE_CHG_MAX)
     ]
 
-    # 거래량 상위 PREFILTER_TOP_N으로 압축
-    df = df.nlargest(PREFILTER_TOP_N, "volume")
+    # 거래대금 상위 PREFILTER_TOP_N으로 압축 (주식 수 기준 정렬은 저가주 편향)
+    df = df.nlargest(PREFILTER_TOP_N, "amount")
     return df.reset_index(drop=True)
 
 
-def get_hist_metrics(ticker: str, today: str) -> dict | None:
+def get_hist_metrics(ticker: str, today: str,
+                     today_close: float, today_volume: float) -> dict | None:
     """
     종목별 과거 데이터로 RSI·MACD·MA 계산
+    마지막 행이 오늘이 아니면 스냅샷 값으로 오늘 행을 보강 (장중·지연 게시 대응)
     실패 시 None 반환
     """
     from_date = (datetime.strptime(today, "%Y%m%d") - timedelta(days=HIST_DAYS)).strftime("%Y%m%d")
     try:
         df = stock.get_market_ohlcv_by_date(from_date, today, ticker)
+        if df is None or df.empty:
+            return None
+        if df.index[-1].strftime("%Y%m%d") != today:
+            extra = pd.DataFrame(
+                {"종가": [today_close], "거래량": [today_volume]},
+                index=[pd.Timestamp(datetime.strptime(today, "%Y%m%d"))],
+            )
+            df = pd.concat([df, extra])
         if len(df) < 30:
             return None
 
@@ -242,44 +253,49 @@ def get_hist_metrics(ticker: str, today: str) -> dict | None:
 # ─────────────────────────────────────────
 
 def calc_tech_score(row: dict) -> int:
-    """기술적 점수 (70점 만점)"""
+    """기술적 점수 (70점 만점) — 수급은 calc_flow_bonus에서 별도 보너스 처리"""
     score = 0
 
-    # 거래량 (15점)
+    # 거래량 (20점)
     if row["vol_ratio"] >= 1.5:
         score += 10
+    if row["vol_ratio"] >= 2.0:
+        score += 5
     if row["vol_ratio"] >= 3.0:
         score += 5
 
-    # 가격 변동 (10점) — 3~8% 구간이 황금 구간
+    # 가격 변동 (15점) — 3~8% 구간이 황금 구간
     chg = row["price_chg"]
     if 3.0 <= chg <= 8.0:
-        score += 10
+        score += 15
     elif (2.0 <= chg < 3.0) or (8.0 < chg <= 12.0):
-        score += 5
+        score += 7
 
-    # 이동평균 (15점)
+    # 이동평균 (20점)
     if row["close"] > row["ma5"]:
-        score += 10
+        score += 12
     if row["close"] > row["ma20"]:
-        score += 5
+        score += 8
 
-    # RSI (10점) — 50~65 황금 구간
+    # RSI (15점) — 50~65 황금 구간
     rsi = row["rsi"]
     if 50.0 <= rsi <= 65.0:
-        score += 10
+        score += 15
     elif 65.0 < rsi <= 70.0:
-        score += 5
+        score += 7
 
-    # 수급 (20점)
+    return score
+
+
+def calc_flow_bonus(row: dict) -> int:
+    """수급 보너스 (최대 10점) — 14시대 외인·기관 데이터는 미확정 잠정치라 보너스로만 반영"""
     f_buy = row.get("foreign_net", 0) > 0
     i_buy = row.get("inst_net", 0) > 0
     if f_buy and i_buy:
-        score += 20
-    elif f_buy or i_buy:
-        score += 10
-
-    return score
+        return 10
+    if f_buy or i_buy:
+        return 5
+    return 0
 
 # ─────────────────────────────────────────
 # LLM 분석
@@ -336,9 +352,19 @@ def analyze_with_gemini(ticker: str, name: str, price_chg: float,
     }
 
     try:
-        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        text = resp.text.strip().replace("```json", "").replace("```", "").strip()
-        result = json.loads(text)
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2,
+            ),
+        )
+        text = (resp.text or "").strip()
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise ValueError(f"JSON 블록 없음: {text[:120]}")
+        result = json.loads(match.group(0))
         # 필드 존재 확인
         for key in fallback:
             result.setdefault(key, fallback[key])
@@ -371,7 +397,7 @@ def build_message(candidates: list, timestamp: str) -> str:
     lines = [
         f"📋 <b>종가매매봇</b> ({timestamp})",
         "",
-        "⏰ <b>실행</b> 14:50 KST | 대상 KOSPI·KOSDAQ 전체",
+        "⏰ <b>실행</b> 14:35 KST | 대상 KOSPI·KOSDAQ 전체",
         "📐 <b>기준</b> RSI 50↑ + MACD 기준선 위 + 5일선 위 + 거래량 1.5배↑",
         "💡 <b>전략</b> 오늘 3시 장 마감 전 매수 → 당일~단기 보유",
         "━━━━━━━━━━━━━━",
@@ -410,6 +436,14 @@ def main():
     ts    = now.strftime("%m/%d %H:%M")
     print(f"[{ts}] 종가매매 알림봇 시작 — 대상일: {today}")
 
+    # 휴장일 가드 — 공휴일에 전 거래일 데이터로 발송되는 것 방지
+    try:
+        if stock.get_nearest_business_day_in_a_week(today) != today:
+            print("오늘은 휴장일 — 종료")
+            return
+    except Exception as e:
+        print(f"[경고] 거래일 확인 실패: {e} — 계속 진행")
+
     # ── 1. 오늘 스냅샷 수집 ──────────────────
     snapshots = []
     for market in ["KOSPI", "KOSDAQ"]:
@@ -447,7 +481,10 @@ def main():
     passed = []
     for _, row in pre.iterrows():
         ticker = row["ticker"]
-        metrics = get_hist_metrics(ticker, today)
+        metrics = get_hist_metrics(
+            ticker, today, float(row["close"]), float(row["volume"])
+        )
+        time.sleep(0.1)  # pykrx 부하 방지 (탈락 종목 포함)
         if metrics is None:
             continue
 
@@ -487,8 +524,6 @@ def main():
             **inv,
         })
 
-        time.sleep(0.15)  # pykrx 부하 방지
-
     print(f"기술적 필터 최종 통과: {len(passed)}종목")
 
     if not passed:
@@ -497,10 +532,11 @@ def main():
 
     # ── 5. 기술적 점수 계산 ──────────────────
     for r in passed:
-        r["tech_score"] = calc_tech_score(r)
+        r["tech_score"]  = calc_tech_score(r)
+        r["flow_bonus"]  = calc_flow_bonus(r)
 
     # 기술 점수 상위 15개만 LLM 분석 (API 비용·속도)
-    passed.sort(key=lambda x: x["tech_score"], reverse=True)
+    passed.sort(key=lambda x: x["tech_score"] + x["flow_bonus"], reverse=True)
     llm_targets = passed[:15]
 
     # ── 6. LLM 분석 ─────────────────────────
@@ -510,7 +546,7 @@ def main():
             r["ticker"], r["name"],
             r["price_chg"], r["vol_ratio"], r["tech_score"]
         )
-        total = r["tech_score"] + llm["news_score"] - llm["risk_deduction"]
+        total = r["tech_score"] + r["flow_bonus"] + llm["news_score"] - llm["risk_deduction"]
         results.append({**r, **llm, "total_score": total})
         time.sleep(1.0)  # Gemini rate limit
 

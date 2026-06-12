@@ -94,19 +94,19 @@ def get_index_tickers(target):
             if result:
                 print(f"[{config['label']}] {len(result)}종목 로드 ({date})")
                 return result
-        except: pass
+        except Exception: pass
     limit = 200 if target == "kospi" else 150
     for date in previous_business_dates(5):
         try:
             df = krx.get_market_cap_by_ticker(date, market=config["market"])
             if df is not None and not df.empty:
                 return df.sort_values("시가총액", ascending=False).head(limit).index.tolist()
-        except: pass
+        except Exception: pass
     try:
         listing = fdr.StockListing(config["market"])
         if listing is not None and "Code" in listing.columns:
             return listing["Code"].dropna().astype(str).str.zfill(6).head(limit).tolist()
-    except: pass
+    except Exception: pass
     return config["fallback"]
 
 
@@ -118,7 +118,7 @@ def get_ohlcv(code):
         if df is not None and not df.empty:
             return df.rename(columns={"시가":"open","고가":"high","저가":"low",
                                        "종가":"close","거래량":"volume"})
-    except: pass
+    except Exception: pass
     try:
         df = fdr.DataReader(
             code,
@@ -127,14 +127,28 @@ def get_ohlcv(code):
         if df is not None and not df.empty:
             return df.rename(columns={"Open":"open","High":"high","Low":"low",
                                        "Close":"close","Volume":"volume"})
-    except: pass
+    except Exception: pass
     return pd.DataFrame()
+
+
+def wait_for_today_data(today, probe="005930", retries=5, wait_sec=60):
+    """KRX 당일 시세 게시 확인 — 미게시면 재시도 후 False"""
+    for attempt in range(retries):
+        try:
+            df = krx.get_market_ohlcv_by_date(today, today, probe)
+            if df is not None and not df.empty and df.index[-1].strftime("%Y%m%d") == today:
+                return True
+        except Exception as e:
+            print(f"[warn] 당일 데이터 확인 실패 ({attempt + 1}/{retries}): {e}")
+        if attempt < retries - 1:
+            time.sleep(wait_sec)
+    return False
 
 
 def get_stock_name(code):
     try:
         return krx.get_market_ticker_name(code) or code
-    except: return code
+    except Exception: return code
 
 # ─────────────────────────────────────────
 # Naver Finance 펀더멘털
@@ -154,8 +168,10 @@ def get_naver_fundamental(code):
         bps_m  = re.search(r"BPS([\d,]+)", t0)
         per_m  = re.search(r"PER([\d\.]+)", t0)
         if eps_m:
-            raw = re.sub(r"[^\d]", "", eps_m.group(1))
-            result["eps"] = int(raw) if raw else 0
+            token = eps_m.group(1)
+            raw   = re.sub(r"[^\d]", "", token)
+            val   = int(raw) if raw else 0
+            result["eps"] = -val if token.lstrip().startswith("-") else val
         if bps_m: result["bps"] = int(bps_m.group(1).replace(",",""))
         if per_m: result["per"] = float(per_m.group(1))
         if result.get("eps",0) > 0 and result.get("bps",0) > 0:
@@ -189,9 +205,10 @@ def calc_obv(close, volume):
 
 
 def calc_rsi(close, period=14):
+    """RSI 계산 (Wilder 방식)"""
     delta = close.diff()
-    ag    = delta.where(delta>0, 0.0).ewm(span=period, adjust=False).mean()
-    al    = (-delta.where(delta<0, 0.0)).ewm(span=period, adjust=False).mean()
+    ag    = delta.where(delta>0, 0.0).ewm(alpha=1/period, adjust=False).mean()
+    al    = (-delta.where(delta<0, 0.0)).ewm(alpha=1/period, adjust=False).mean()
     ll    = float(al.iloc[-1])
     if ll == 0: return 100.0
     return float((100 - 100/(1+ag/al)).iloc[-1])
@@ -203,14 +220,14 @@ def calc_atr(high, low, close, period=14):
         (high - close.shift()).abs(),
         (low  - close.shift()).abs()
     ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+    return tr.ewm(alpha=1/period, adjust=False).mean()  # Wilder ATR
 
 
 def check_rsi_divergence(close, period=14, lookback=20):
     if len(close) < lookback + period: return False
     delta    = close.diff()
-    ag       = delta.where(delta>0, 0.0).ewm(span=period, adjust=False).mean()
-    al       = (-delta.where(delta<0, 0.0)).ewm(span=period, adjust=False).mean()
+    ag       = delta.where(delta>0, 0.0).ewm(alpha=1/period, adjust=False).mean()
+    al       = (-delta.where(delta<0, 0.0)).ewm(alpha=1/period, adjust=False).mean()
     rsi_s    = (100 - 100/(1+ag/al.replace(0, np.nan))).fillna(100)
     pr       = close.iloc[-lookback:]
     low1_idx = pr.idxmin()
@@ -246,17 +263,14 @@ def find_trigger_candle(close, high, low, open_, volume, vol_ma20, lookback=20):
     return False, 0, 0.0, 0.0, 0.0
 
 
-def calc_fib_levels(cur, recent_low):
-    """현재가 ~ 최근 저점 상승폭 기준 피보나치 되돌림 (항상 현재가 아래)"""
-    up     = cur - recent_low
-    f236   = round(cur - up * 0.236, -1)
-    f382   = round(cur - up * 0.382, -1)
-    f618   = round(cur - up * 0.618, -1)
-    # 레벨 역전 방지
-    f618 = max(f618, recent_low)
-    f382 = max(f382, f618 + 1)
-    f236 = max(f236, f382 + 1)
-    return f236, f382, f618
+def calc_fib_levels(recent_high, recent_low):
+    """스윙 고점→저점 기준 피보나치 되돌림 레벨"""
+    up   = recent_high - recent_low
+    f236 = round(recent_high - up * 0.236, -1)
+    f382 = round(recent_high - up * 0.382, -1)
+    f500 = round(recent_high - up * 0.500, -1)
+    f618 = round(recent_high - up * 0.618, -1)
+    return f236, f382, f500, f618
 
 
 def calc_fib_targets(cur, recent_high, recent_low):
@@ -268,9 +282,11 @@ def calc_fib_targets(cur, recent_high, recent_low):
 # ─────────────────────────────────────────
 # 종목 분석 (기술적 필터)
 # ─────────────────────────────────────────
-def analyze_ticker(code, market_label):
+def analyze_ticker(code, market_label, today):
     df = get_ohlcv(code)
     if len(df) < 130: return None
+    if df.index[-1].strftime("%Y%m%d") != today:
+        return None  # 당일 데이터 미게시 — 전일 기준 오판 방지
 
     close  = df["close"].astype(float)
     high   = df["high"].astype(float)
@@ -299,7 +315,7 @@ def analyze_ticker(code, market_label):
 
     # ══════════════════════════════════════
     # 필수 조건 2: 트리거 캔들 (눌림목 기준점)
-    # 최근 3~20일 내 윗꼬리 없는 장대양봉
+    # 최근 2~20일 내 윗꼬리 없는 장대양봉
     # ══════════════════════════════════════
     found, days_ago, trig_pct, trig_close, trig_vol = \
         find_trigger_candle(close, high, low, open_, volume, vol_ma20, lookback=20)
@@ -360,7 +376,10 @@ def analyze_ticker(code, market_label):
 
     recent_low  = float(low.iloc[-30:].min())
     recent_high = float(high.iloc[-30:].max())
-    fib_236, fib_382, fib_618 = calc_fib_levels(cur, recent_low)
+    if recent_high <= recent_low: return None
+    fib_236, fib_382, fib_500, fib_618 = calc_fib_levels(recent_high, recent_low)
+    if cur <= fib_618:
+        return None  # 61.8% 이탈 = 눌림목 무효 (매매원칙상 전량 손절 구간)
     fib1, fib2  = calc_fib_targets(cur, recent_high, recent_low)
 
     # ══════════════════════════════════════
@@ -416,7 +435,7 @@ def analyze_ticker(code, market_label):
         "ma20": ma20, "ma120": ma120,
         "rsi_val": rsi_val, "rsi_div": rsi_div,
         "atr": atr_val, "stop_2x": stop_2x, "stop_3x": stop_3x,
-        "fib_236": fib_236, "fib_382": fib_382, "fib_618": fib_618,
+        "fib_236": fib_236, "fib_382": fib_382, "fib_500": fib_500, "fib_618": fib_618,
         "fib1": fib1, "fib2": fib2,
         "signals": signals,
         "roe": 0.0, "per": 0.0, "foreign_ratio": 0.0,
@@ -428,6 +447,10 @@ def analyze_ticker(code, market_label):
 def enrich_with_naver(r):
     nav   = get_naver_fundamental(r["code"])
     time.sleep(0.3)
+
+    # 적자 기업 제외 (CAN SLIM) — 데이터 확보 시에만 적용
+    if nav.get("eps") is not None and nav["eps"] < 0:
+        return None
 
     roe   = nav.get("roe", 0.0)
     per   = nav.get("per", 0.0)
@@ -468,30 +491,37 @@ def enrich_with_naver(r):
 def build_investment_guide(r):
     """
     눌림목 분할매수 전략
-    피보나치 23.6% · 38.2% 단계 매수 → 61.8% 손절
-    매수 구간과 손절 구간이 명확히 분리됨
+    스윙 고점 기준 피보나치 되돌림 중 현재가 아래 레벨만 매수 사다리로 사용
+    61.8% 이탈 시 손절 (이탈 종목은 선별 단계에서 이미 제외)
     """
-    price   = r["price"]
-    fib1    = r["fib1"]
-    fib2    = r["fib2"]
-    atr     = r["atr"]
-    f236    = r["fib_236"]
-    f382    = r["fib_382"]
-    f618    = r["fib_618"]
+    price = r["price"]
+    fib1  = r["fib1"]
+    fib2  = r["fib2"]
+    stop  = r["fib_618"]
 
-    stop    = f618
-    risk    = abs(price - stop) / price * 100
-    gap     = abs(f382 - stop) / price * 100
-    rr      = (fib1 - price) / max(price - stop, 1)
+    candidates = [
+        ("23.6% 되돌림", r["fib_236"]),
+        ("38.2% 되돌림", r["fib_382"]),
+        ("50.0% 되돌림", r["fib_500"]),
+    ]
+    buys    = [(lab, lv) for lab, lv in candidates if stop < lv < price * 0.995][:2]
+    weights = {2: ("34%", "33%", "33%"), 1: ("50%", "50%"), 0: ("100%",)}[len(buys)]
+
+    risk     = abs(price - stop) / price * 100
+    last_buy = buys[-1][1] if buys else price
+    gap      = (last_buy - stop) / price * 100
+    rr       = (fib1 - price) / max(price - stop, 1)
 
     lines = [
         "   📐 <b>눌림목 분할매수 전략</b>",
-        f"   ├ 1차 (34%): {price:,.0f}원  ← 지금 진입",
-        f"   ├ 2차 (33%): {f236:,.0f}원  ← 23.6% 되돌림",
-        f"   ├ 3차 (33%): {f382:,.0f}원  ← 38.2% 되돌림",
+        f"   ├ 1차 ({weights[0]}): {price:,.0f}원  ← 지금 진입",
+    ]
+    for n, (lab, lv) in enumerate(buys, 2):
+        lines.append(f"   ├ {n}차 ({weights[n-1]}): {lv:,.0f}원  ← {lab}")
+    lines += [
         f"   ├ ── 매수 구간 끝 / 손절 구간 ──",
         f"   ├ 🛑 손절: {stop:,.0f}원  (61.8% 이탈, -{risk:.1f}%)",
-        f"   ├    ↳ 3차~손절 간격 {gap:.1f}% (명확히 분리)",
+        f"   ├    ↳ 마지막 매수~손절 간격 {gap:.1f}%",
         f"   │",
         f"   ├ 🎯 1차 목표: {fib1:,.0f}원  (1:1 확장 — 여기서 절반 익절)",
         f"   ├ 🎯 2차 목표: {fib2:,.0f}원  (1.618 확장)",
@@ -514,7 +544,7 @@ def build_report(results, ts):
         "③눌림 3~20% + 거래량 감소\n"
         "④MA10·MA20 지지 + 오늘 캔들 확인\n"
         "⑤OBV 스마트머니 ⑥RSI 눌림목 구간\n"
-        "⑦펀더멘털(ROE·PER) — Naver 검증\n"
+        "⑦펀더멘털 적자기업 제외 + ROE·PER 가점\n"
         "━━━━━━━━━━━━━━\n"
     )
 
@@ -564,14 +594,14 @@ def send_telegram(message, dry_run=False):
 # ─────────────────────────────────────────
 # 스캔
 # ─────────────────────────────────────────
-def scan_market(target):
+def scan_market(target, today):
     config  = INDEX_CODES[target]
     tickers = get_index_tickers(target)
     print(f"[scan] {config['label']} {len(tickers)}종목")
 
     tech_passed = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(analyze_ticker, t, config["label"]): t for t in tickers}
+        futures = {ex.submit(analyze_ticker, t, config["label"], today): t for t in tickers}
         for idx, f in enumerate(as_completed(futures), 1):
             r = f.result()
             if r: tech_passed.append(r)
@@ -584,6 +614,8 @@ def scan_market(target):
     enriched = []
     for r in tech_passed:
         r = enrich_with_naver(r)
+        if r is None:
+            continue  # 적자 기업 제외
         if r["score"] >= MIN_SCORE:
             enriched.append(r)
 
@@ -601,12 +633,28 @@ def parse_args():
 
 def main():
     args    = parse_args()
-    ts      = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    now     = datetime.now(KST)
+    today   = now.strftime("%Y%m%d")
+    ts      = now.strftime("%Y-%m-%d %H:%M")
     targets = ["kospi","kosdaq"] if args.market == "all" else [args.market]
+
+    # 휴장일 가드 — 공휴일에 전 거래일 데이터로 발송되는 것 방지
+    try:
+        if krx.get_nearest_business_day_in_a_week(today) != today:
+            print("오늘은 휴장일 — 종료")
+            return 0
+    except Exception as e:
+        print(f"[warn] 거래일 확인 실패: {e} — 계속 진행")
+
+    # 당일 데이터 게시 대기 (최대 5분)
+    if not wait_for_today_data(today):
+        send_telegram(f"⚠️ 인사이트스캐너 ({ts})\n당일 시세 미게시로 스캔 보류",
+                      dry_run=args.dry_run)
+        return 0
 
     all_results = []
     for t in targets:
-        all_results.extend(scan_market(t))
+        all_results.extend(scan_market(t, today))
 
     all_results.sort(key=lambda x: x["score"], reverse=True)
     all_results = all_results[:TOP_N]

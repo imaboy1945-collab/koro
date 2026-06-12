@@ -2,14 +2,14 @@ name: KOSDAQ 사전 발굴 스캐너
 
 on:
   schedule:
-    # 15:30 KST = 06:30 UTC, 월~금
-    - cron: "30 6 * * 1-5"
+    # 15:45 KST = 06:45 UTC, 월~금 (당일 시세 게시 후)
+    - cron: "45 6 * * 1-5"
   workflow_dispatch:
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4.2.2
